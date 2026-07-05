@@ -154,6 +154,52 @@ SYMON_REQUIRE_ALL_WORKERS=0
 
 `SYMON_REQUIRE_ALL_WORKERS=0` is used while the VLM model is staged later. Set it to `1` after a VLM model is added and verified.
 
+### Per-model runtime tuning (context, VRAM share, KV cache, sampling)
+
+Gemma and Qwen each accept per-model overrides that fall back to a shared
+`SYMON_VLLM_*` / `SYMON_TOP_P` / `SYMON_TOP_K` default when unset. These are the
+vLLM equivalents of llama.cpp's `--ctx-size`, `--n-gpu-layers`, `--cache-type-k/v`,
+`-fa`, `--temp`, `--top-p`, and `--top-k` flags (this project runs vLLM + diffusers,
+not llama.cpp, so the flags themselves don't apply, but the effect does):
+
+```bash
+# Context length (--ctx-size)
+SYMON_GEMMA_MAX_MODEL_LEN=16384
+SYMON_QWEN_MAX_MODEL_LEN=8192
+
+# VRAM fraction this model may reserve (closest vLLM analog to --n-gpu-layers 99
+# on a single GPU where the whole model is already offloaded to GPU)
+SYMON_GEMMA_GPU_MEMORY_UTILIZATION=0.55
+SYMON_QWEN_GPU_MEMORY_UTILIZATION=0.35
+
+# KV cache dtype (--cache-type-k / --cache-type-v; closest to q8_0 is fp8)
+SYMON_GEMMA_KV_CACHE_DTYPE=fp8
+SYMON_QWEN_KV_CACHE_DTYPE=fp8
+
+# Attention backend pin (-fa on; vLLM already auto-selects FlashAttention/
+# FlashInfer, leave blank unless you need to force one)
+SYMON_GEMMA_ATTENTION_BACKEND=
+SYMON_QWEN_ATTENTION_BACKEND=
+
+# Sampling (--temp / --top-p / --top-k)
+SYMON_TEMPERATURE_CHAT=1.0
+SYMON_TEMPERATURE_CODE=0.2
+SYMON_GEMMA_TOP_P=0.95
+SYMON_GEMMA_TOP_K=64
+SYMON_QWEN_TOP_P=0.90
+SYMON_QWEN_TOP_K=40
+```
+
+Use the interactive configurator instead of hand-editing these:
+
+```bash
+python3 tools/configure_model_runtime.py
+```
+
+It presents each setting with its llama.cpp-flag equivalent, validates ranges,
+and writes to `.env`. Restart the service afterward (`scripts/stop.sh && scripts/start.sh`)
+so the new values are picked up.
+
 For one 16 GB GPU, keep:
 
 ```bash
@@ -170,6 +216,7 @@ Active model-prep tools:
 tools/hf_download_interactive.py
 tools/hf_to_gguf_interactive.py
 tools/quantize_gguf_interactive.py
+tools/configure_model_runtime.py
 scripts/check_models_magic.sh
 ```
 
@@ -258,6 +305,19 @@ IQ3_M
 IQ2_M
 ```
 
+### Configure per-model runtime (context, VRAM share, KV cache, sampling)
+
+Use:
+
+```bash
+tools/configure_model_runtime.py
+```
+
+Interactive menu to set, per model (Gemma, Qwen, and the Stable Diffusion v1-5
+safetensors runtime), the vLLM equivalents of llama.cpp's `--ctx-size`,
+`--n-gpu-layers`, `--cache-type-k/v`, `-fa`, `--temp`, `--top-p`, and `--top-k`.
+Writes to `.env`. See "Per-model runtime tuning" above for the full env var list.
+
 ## Production gates
 
 Static packaging check:
@@ -344,6 +404,7 @@ SyMoNeuRaL_MoE/
     hf_download_interactive.py
     hf_to_gguf_interactive.py
     quantize_gguf_interactive.py
+    configure_model_runtime.py
   production_audit.py
   requirements.txt
   README.md

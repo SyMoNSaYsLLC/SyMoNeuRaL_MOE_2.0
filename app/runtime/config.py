@@ -187,7 +187,16 @@ class RuntimeSettings:
     temperature_code: float = _env_float("SYMON_TEMPERATURE_CODE", 0.2)
     temperature_vision: float = _env_float("SYMON_TEMPERATURE_VISION", 0.2)
     top_p: float = _env_float("SYMON_TOP_P", 0.95)
+    top_k: int = _env_int("SYMON_TOP_K", 64)
     repetition_penalty: float = _env_float("SYMON_REPETITION_PENALTY", 1.05)
+
+    # KV cache dtype / attention backend (llama.cpp equivalents: --cache-type-k/v, -fa).
+    # "auto" lets vLLM pick; "fp8"/"fp8_e5m2" quantizes the KV cache similar in spirit
+    # to llama.cpp's q8_0 cache types (not bit-identical, but same VRAM-saving intent).
+    vllm_kv_cache_dtype: str = _env_str("SYMON_VLLM_KV_CACHE_DTYPE", "auto")
+    # Leave blank to let vLLM auto-select (it already prefers FlashAttention/FlashInfer
+    # when available -- this is the vLLM equivalent of llama.cpp's `-fa on`).
+    vllm_attention_backend: str = _env_str("SYMON_VLLM_ATTENTION_BACKEND", "")
 
     # Diffusers image runtime.
     image_width: int = _env_int("SYMON_IMAGE_WIDTH", 512)

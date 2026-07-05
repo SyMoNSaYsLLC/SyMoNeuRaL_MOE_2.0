@@ -128,6 +128,40 @@ def _env_model_value(name: str, suffix: str) -> str | None:
     return None
 
 
+def _env_model_float(name: str, suffix: str, default: float) -> float:
+    """Per-model override with global fallback, e.g. SYMON_GEMMA_TOP_P then SYMON_TOP_P."""
+    safe_name = name.upper().replace("-", "_")
+    for env_name in (f"SYMON_{safe_name}_{suffix}", f"SYMON_{suffix}"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            try:
+                return float(value)
+            except ValueError:
+                continue
+    return default
+
+
+def _env_model_int(name: str, suffix: str, default: int) -> int:
+    safe_name = name.upper().replace("-", "_")
+    for env_name in (f"SYMON_{safe_name}_{suffix}", f"SYMON_{suffix}"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            try:
+                return int(float(value))
+            except ValueError:
+                continue
+    return default
+
+
+def _env_model_str(name: str, suffix: str, default: str) -> str:
+    safe_name = name.upper().replace("-", "_")
+    for env_name in (f"SYMON_{safe_name}_{suffix}", f"SYMON_{suffix}"):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            return value.strip()
+    return default
+
+
 def _hf_token() -> str | None:
     for env_name in (
         "HF_TOKEN",
@@ -386,13 +420,24 @@ def _filter_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
 
 
 def _llm_kwargs(name: str, resolved_model: str, *, multimodal: bool) -> dict[str, Any]:
+    # Per-model overrides fall back to the shared SYMON_VLLM_* value, e.g.
+    # SYMON_GEMMA_MAX_MODEL_LEN (llama.cpp: --ctx-size) or
+    # SYMON_QWEN_GPU_MEMORY_UTILIZATION (llama.cpp: how much VRAM a model is
+    # allowed to claim -- vLLM's analog of --n-gpu-layers on a single-GPU,
+    # fully-offloaded setup is the fraction of VRAM it's allowed to reserve).
+    max_model_len = _env_model_int(name, "MAX_MODEL_LEN", SETTINGS.vllm_max_model_len)
+    gpu_memory_utilization = _env_model_float(
+        name, "GPU_MEMORY_UTILIZATION", SETTINGS.vllm_gpu_memory_utilization
+    )
+    kv_cache_dtype = _env_model_str(name, "KV_CACHE_DTYPE", SETTINGS.vllm_kv_cache_dtype)
+
     kwargs: dict[str, Any] = {
         "model": resolved_model,
         "trust_remote_code": SETTINGS.vllm_trust_remote_code,
         "tensor_parallel_size": 1,
         "dtype": SETTINGS.vllm_dtype,
-        "gpu_memory_utilization": SETTINGS.vllm_gpu_memory_utilization,
-        "max_model_len": SETTINGS.vllm_max_model_len,
+        "gpu_memory_utilization": gpu_memory_utilization,
+        "max_model_len": max_model_len,
         "cpu_offload_gb": SETTINGS.vllm_cpu_offload_gb,
         "swap_space": SETTINGS.vllm_swap_space_gb,
         "enforce_eager": SETTINGS.vllm_enforce_eager,
@@ -403,6 +448,9 @@ def _llm_kwargs(name: str, resolved_model: str, *, multimodal: bool) -> dict[str
         "max_num_seqs": SETTINGS.vllm_max_num_seqs,
         "max_num_batched_tokens": SETTINGS.vllm_max_num_batched_tokens,
     }
+
+    if kv_cache_dtype and kv_cache_dtype.lower() != "auto":
+        kwargs["kv_cache_dtype"] = kv_cache_dtype
 
     if SETTINGS.vllm_quantization:
         kwargs["quantization"] = SETTINGS.vllm_quantization
@@ -461,6 +509,13 @@ def load(name: str, model_ref: str, *, multimodal: bool = False) -> LoadedModel:
         except Exception:
             pass
 
+        # llama.cpp's `-fa on` forces flash-attention. vLLM auto-selects the best
+        # backend already, but this lets you pin one (e.g. FLASH_ATTN, FLASHINFER,
+        # XFORMERS) via SYMON_<NAME>_ATTENTION_BACKEND / SYMON_VLLM_ATTENTION_BACKEND.
+        attention_backend = _env_model_str(name, "ATTENTION_BACKEND", SETTINGS.vllm_attention_backend)
+        if attention_backend:
+            os.environ["VLLM_ATTENTION_BACKEND"] = attention_backend
+
         from vllm import LLM
 
         kwargs = _filter_kwargs(LLM, _llm_kwargs(name, resolved_model, multimodal=multimodal))
@@ -475,15 +530,28 @@ def load(name: str, model_ref: str, *, multimodal: bool = False) -> LoadedModel:
         return _ACTIVE
 
 
-def _sampling(max_new_tokens: int, temperature: float) -> Any:
+def _sampling(name: str, max_new_tokens: int, temperature: float) -> Any:
     from vllm import SamplingParams
 
-    return SamplingParams(
-        max_tokens=max(1, int(max_new_tokens)),
-        temperature=max(0.0, float(temperature)),
-        top_p=SETTINGS.top_p,
-        repetition_penalty=SETTINGS.repetition_penalty,
-    )
+    # Per-model overrides (e.g. SYMON_GEMMA_TOP_P / SYMON_QWEN_TOP_K) fall back to
+    # the shared SYMON_TOP_P / SYMON_TOP_K / SYMON_REPETITION_PENALTY values.
+    top_p = _env_model_float(name, "TOP_P", SETTINGS.top_p)
+    top_k = _env_model_int(name, "TOP_K", SETTINGS.top_k)
+    repetition_penalty = _env_model_float(name, "REPETITION_PENALTY", SETTINGS.repetition_penalty)
+
+    kwargs: dict[str, Any] = {
+        "max_tokens": max(1, int(max_new_tokens)),
+        "temperature": max(0.0, float(temperature)),
+        "top_p": top_p,
+        "repetition_penalty": repetition_penalty,
+    }
+
+    # llama.cpp's --top-k 0 means "disabled"; vLLM uses -1 for that. 0 or fewer
+    # from the .env is treated as "off" here so both conventions behave the same.
+    if top_k and top_k > 0:
+        kwargs["top_k"] = top_k
+
+    return SamplingParams(**kwargs)
 
 
 def generate(
@@ -499,7 +567,7 @@ def generate(
         kv_cache.observe(prompt, worker=name)
 
         loaded = load(name, model_ref, multimodal=False)
-        sampling = _sampling(max_new_tokens, temperature)
+        sampling = _sampling(name, max_new_tokens, temperature)
 
         messages = [
             {"role": "system", "content": system},
@@ -533,7 +601,7 @@ def generate_vision(
         from PIL import Image
 
         images = [Image.open(Path(p).expanduser()).convert("RGB") for p in image_paths]
-        sampling = _sampling(max_new_tokens, temperature)
+        sampling = _sampling(name, max_new_tokens, temperature)
 
         if len(images) == 1:
             multi_modal_data: dict[str, Any] = {"image": images[0]}
