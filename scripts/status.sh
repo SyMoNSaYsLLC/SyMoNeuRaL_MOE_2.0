@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
 set -euo pipefail
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+
+if [ -f .env ]; then
+  set -a
+  . ./.env
+  set +a
+elif [ -f config/symoneural.env ]; then
+  set -a
+  . ./config/symoneural.env
+  set +a
+fi
+
 PORT="${SYMON_BIND_PORT:-8000}"
 
 echo "===== process ====="

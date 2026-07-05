@@ -17,6 +17,7 @@ huggingface-hub>=0.24
 sentencepiece>=0.2
 protobuf>=5.27
 numpy>=1.26
+vllm-gguf-plugin
 
 # Image generation backend.
 diffusers>=0.30

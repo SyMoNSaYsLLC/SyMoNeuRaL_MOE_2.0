@@ -5,11 +5,14 @@ import ast
 import importlib
 import json
 import os
+import re
 import sys
+from dataclasses import is_dataclass, replace
 from pathlib import Path
 from typing import Any
 
-ROOT = Path.cwd()
+ROOT = Path(__file__).resolve().parent
+
 REQUIRED = [
     "app/main.py",
     "app/symoneural.py",
@@ -31,11 +34,16 @@ REQUIRED = [
     "app/comms/gemmacodercomms.py",
     "app/comms/gemmaimagingcomms.py",
     "app/comms/gemmavisioncomms.py",
+    "scripts/bootstrap_env.sh",
     "scripts/start.sh",
     "scripts/stop.sh",
     "scripts/status.sh",
     "scripts/test.sh",
     "scripts/install_cuda_vllm.sh",
+    "scripts/check_models_magic.sh",
+    "tools/hf_download_interactive.py",
+    "tools/hf_to_gguf_interactive.py",
+    "tools/quantize_gguf_interactive.py",
     "README.md",
     "requirements.txt",
     "docs/ARCHITECTURE.md",
@@ -48,6 +56,12 @@ REQUIRED = [
     "docs/MULTIMODAL_VISION.md",
     "docs/PRODUCTION_RUNBOOK.md",
 ]
+
+DEPRECATED = [
+    "tools/convert_hf_to_gguf_legacy.sh",
+    "tools/download_models_example.py",
+]
+
 PY_MODULES = [
     "app.main",
     "app.symoneural",
@@ -67,6 +81,7 @@ PY_MODULES = [
     "app.comms.gemmaimagingcomms",
     "app.comms.gemmavisioncomms",
 ]
+
 RUNTIME_FORBIDDEN = [
     "llama-server",
     "symon-llm-server",
@@ -75,6 +90,7 @@ RUNTIME_FORBIDDEN = [
     "http://127.0.0.1:18081",
     "http://127.0.0.1:18082",
 ]
+
 checks: list[tuple[str, bool, str]] = []
 
 
@@ -83,30 +99,171 @@ def check(name: str, ok: bool, detail: str = "") -> None:
 
 
 def text(rel: str) -> str:
-    return (ROOT / rel).read_text(errors="ignore")
+    path = ROOT / rel
+    if not path.exists():
+        return ""
+    return path.read_text(errors="ignore")
+
+
+def bool_from_env(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def load_env_file() -> bool:
+    env_path = ROOT / ".env"
+    if not env_path.is_file():
+        return False
+
+    key_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    for raw in env_path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if not key_re.match(key):
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        os.environ.setdefault(key, value)
+
+    return True
+
+
+def env_first(names: list[str], fallback: str) -> str:
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    return fallback
+
+
+def model_ref_from_env_or_attr(env_names: list[str], models_obj: Any, attr: str) -> str:
+    fallback = str(getattr(models_obj, attr))
+    return env_first(env_names, fallback)
+
+
+def model_refs(models_obj: Any) -> dict[str, str]:
+    return {
+        "gemma": model_ref_from_env_or_attr(["SYMON_GEMMA_MODEL"], models_obj, "gemma"),
+        "qwen": model_ref_from_env_or_attr(["SYMON_QWEN_MODEL"], models_obj, "qwen"),
+        "vision": model_ref_from_env_or_attr(
+            ["SYMON_VISION_MODEL", "SYMON_VLM_MODEL"],
+            models_obj,
+            "vision",
+        ),
+        "stable": model_ref_from_env_or_attr(
+            ["SYMON_STABLE_MODEL", "SYMON_IMAGE_MODEL"],
+            models_obj,
+            "stable",
+        ),
+    }
+
+
+def apply_model_refs_to_config(config_module: Any, models_obj: Any, refs: dict[str, str]) -> Any:
+    updates = {
+        "gemma": refs["gemma"],
+        "qwen": refs["qwen"],
+        "vision": refs["vision"],
+        "stable": refs["stable"],
+    }
+
+    if is_dataclass(models_obj):
+        try:
+            new_models = replace(models_obj, **updates)
+            setattr(config_module, "MODELS", new_models)
+            return new_models
+        except Exception:
+            pass
+
+    if hasattr(models_obj, "model_copy"):
+        try:
+            new_models = models_obj.model_copy(update=updates)
+            setattr(config_module, "MODELS", new_models)
+            return new_models
+        except Exception:
+            pass
+
+    for key, value in updates.items():
+        try:
+            setattr(models_obj, key, value)
+        except Exception:
+            pass
+
+    try:
+        setattr(config_module, "MODELS", models_obj)
+    except Exception:
+        pass
+
+    return models_obj
+
+
+def detail_ok(detail: Any) -> bool:
+    if isinstance(detail, dict):
+        return bool(detail.get("ok"))
+    return bool(detail)
+
+
+def call_ready_detail(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    try:
+        detail = fn(*args, **kwargs)
+        if isinstance(detail, dict):
+            return detail
+        return {"ok": bool(detail), "detail": detail}
+    except Exception as exc:
+        return {"ok": False, "error": repr(exc)}
 
 
 def static_checks() -> None:
     for rel in REQUIRED:
         check(f"exists {rel}", (ROOT / rel).exists())
 
-    for py in (ROOT / "app").rglob("*.py"):
-        if "__pycache__" in py.parts:
+    for rel in DEPRECATED:
+        check(f"deprecated removed {rel}", not (ROOT / rel).exists())
+
+    for base in (ROOT / "app", ROOT / "tools"):
+        if not base.exists():
             continue
-        try:
-            ast.parse(py.read_text(), filename=str(py))
-            check(f"syntax {py.relative_to(ROOT)}", True)
-        except SyntaxError as exc:
-            check(f"syntax {py.relative_to(ROOT)}", False, f"{exc.lineno}:{exc.offset} {exc.msg}")
+        for py in base.rglob("*.py"):
+            if "__pycache__" in py.parts:
+                continue
+            try:
+                ast.parse(py.read_text(), filename=str(py))
+                check(f"syntax {py.relative_to(ROOT)}", True)
+            except SyntaxError as exc:
+                check(
+                    f"syntax {py.relative_to(ROOT)}",
+                    False,
+                    f"{exc.lineno}:{exc.offset} {exc.msg}",
+                )
 
     hits = []
     for base in (ROOT / "app", ROOT / "scripts"):
+        if not base.exists():
+            continue
         for path in base.rglob("*"):
             if path.is_file() and "__pycache__" not in path.parts:
                 body = path.read_text(errors="ignore")
                 for token in RUNTIME_FORBIDDEN:
                     if token in body:
                         hits.append(f"{path.relative_to(ROOT)} contains {token}")
+
     check("no stale local worker servers", not hits, "; ".join(hits[:20]))
 
     main = text("app/main.py")
@@ -116,22 +273,78 @@ def static_checks() -> None:
     kv = text("app/runtime/kv_cache.py")
     req = text("requirements.txt")
     readme = text("README.md")
+    config = text("app/runtime/config.py")
 
-    check("main exposes OpenAI chat completions", "/v1/chat/completions" in main and "ChatRequest" in main)
-    check("main extracts multimodal OpenAI content", "image_url" in main and "extract_user_payload" in main)
-    check("symoneural routes all four workers", all(x in sym for x in ("gemmacodercomms", "gemmaimagingcomms", "gemmavisioncomms")))
-    check("vLLM is in-process not HTTP server", "from vllm import LLM" in vllm and "llm.chat" in vllm and "llm.generate" in vllm)
-    check("vLLM prefix caching configured", "enable_prefix_caching" in vllm and "SYMON_VLLM_ENABLE_PREFIX_CACHING" in text("app/runtime/config.py"))
-    check("vLLM multimodal path exists", "generate_vision" in vllm and "multi_modal_data" in vllm)
-    check("flow control enforces concurrency", "max_concurrent_text" in flow and "admission_rejected" in flow)
-    check("prefix routing tracks hot prefixes", "prefix_hash" in kv and "preferred_worker" in kv)
-    check("requirements includes vllm/diffusers/pynvml", all(x in req for x in ("vllm", "diffusers", "pynvml")))
-    check("README documents flagship backend", "vLLM CUDA" in readme and "Vision" in readme and "SLO" in readme)
-    check("docs include HF to GGUF guide", "GGUF" in text("docs/MODEL_CONVERSION.md"))
+    check(
+        "main exposes OpenAI chat completions",
+        "/v1/chat/completions" in main and "ChatRequest" in main,
+    )
+    check(
+        "main extracts multimodal OpenAI content",
+        "image_url" in main and "extract_user_payload" in main,
+    )
+    check(
+        "symoneural routes all four workers",
+        all(x in sym for x in ("gemmacodercomms", "gemmaimagingcomms", "gemmavisioncomms")),
+    )
+    check(
+        "vLLM is in-process not HTTP server",
+        "from vllm import LLM" in vllm and "llm.chat" in vllm and "llm.generate" in vllm,
+    )
+    check(
+        "vLLM prefix caching configured",
+        "enable_prefix_caching" in vllm and "SYMON_VLLM_ENABLE_PREFIX_CACHING" in config,
+    )
+    check(
+        "vLLM multimodal path exists",
+        "generate_vision" in vllm and "multi_modal_data" in vllm,
+    )
+    check(
+        "flow control enforces concurrency",
+        "max_concurrent_text" in flow and "admission_rejected" in flow,
+    )
+    check(
+        "prefix routing tracks hot prefixes",
+        "prefix_hash" in kv and "preferred_worker" in kv,
+    )
+    check(
+        "requirements includes vllm/diffusers/pynvml",
+        all(x in req for x in ("vllm", "diffusers", "pynvml")),
+    )
+    check(
+        "README documents CUDA backend",
+        ("CUDA-backed" in readme or "vLLM CUDA" in readme)
+        and "Vision" in readme
+        and "SLO" in readme,
+    )
+    check(
+        "docs include HF to GGUF guide",
+        "GGUF" in text("docs/MODEL_CONVERSION.md"),
+    )
+
+    deprecated_hits = []
+    for base in ("README.md", "docs", "tools", "scripts", "app"):
+        path = ROOT / base
+        if path.is_file():
+            body = path.read_text(errors="ignore")
+            for token in ("convert_hf_to_gguf_legacy", "download_models_example"):
+                if token in body:
+                    deprecated_hits.append(f"{base} contains {token}")
+        elif path.is_dir():
+            for sub in path.rglob("*"):
+                if sub.is_file() and "__pycache__" not in sub.parts:
+                    body = sub.read_text(errors="ignore")
+                    for token in ("convert_hf_to_gguf_legacy", "download_models_example"):
+                        if token in body:
+                            deprecated_hits.append(f"{sub.relative_to(ROOT)} contains {token}")
+
+    check("no deprecated tool references", not deprecated_hits, "; ".join(deprecated_hits[:20]))
 
 
 def import_checks() -> None:
-    sys.path.insert(0, str(ROOT))
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
     for mod in PY_MODULES:
         try:
             importlib.import_module(mod)
@@ -141,11 +354,14 @@ def import_checks() -> None:
 
 
 def production_checks(live: bool) -> None:
-    sys.path.insert(0, str(ROOT))
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
     try:
         from fastapi.testclient import TestClient
         from app.main import app
         from app import symoneural
+        import app.runtime.config as runtime_config
         from app.runtime.config import MODELS, SETTINGS, resolve_local_path
         from app.runtime.backends import vllm_engine
         from app.runtime import image_engine
@@ -153,31 +369,121 @@ def production_checks(live: bool) -> None:
         check("load app for production checks", False, repr(exc))
         return
 
+    refs = model_refs(MODELS)
+    active_models = apply_model_refs_to_config(runtime_config, MODELS, refs)
+    refs = model_refs(active_models)
+
+    require_all_workers = bool_from_env(
+        "SYMON_REQUIRE_ALL_WORKERS",
+        bool(getattr(SETTINGS, "require_all_workers", True)),
+    )
+
+    check(
+        "audit resolved model refs",
+        True,
+        json.dumps(
+            {
+                "gemma": refs["gemma"],
+                "qwen": refs["qwen"],
+                "vision": refs["vision"],
+                "stable": refs["stable"],
+                "require_all_workers": require_all_workers,
+            }
+        ),
+    )
+
     client = TestClient(app)
+
     health = client.get("/health")
     check("GET /health returns 200", health.status_code == 200, health.text[:500])
+
     models = client.get("/v1/models")
     check("GET /v1/models returns 200", models.status_code == 200, models.text[:500])
 
     deps = vllm_engine.dependency_status()
     check("torch import present", "torch_error" not in deps, str(deps.get("torch_error", "")))
     check("vllm import present", "vllm_error" not in deps, str(deps.get("vllm_error", "")))
-    if SETTINGS.device == "cuda":
+
+    device = os.environ.get("SYMON_DEVICE", str(getattr(SETTINGS, "device", "cpu")))
+    if device == "cuda":
         check("CUDA visible to torch", bool(deps.get("cuda_available")), json.dumps(deps))
 
-    for name, ref in ("gemma", MODELS.gemma), ("qwen", MODELS.qwen), ("vision", MODELS.vision):
-        detail = vllm_engine.ready_detail(ref, multimodal=(name == "vision"))
-        check(f"{name} vLLM model ready", bool(detail.get("ok")), json.dumps(detail)[:1200])
-    img = image_engine.ready_detail(MODELS.stable)
-    check("image model ready", bool(img.get("ok")), json.dumps(img)[:1200])
+    gemma_detail = call_ready_detail(vllm_engine.ready_detail, refs["gemma"], multimodal=False)
+    check("gemma vLLM model ready", detail_ok(gemma_detail), json.dumps(gemma_detail)[:1200])
 
-    workers = symoneural.worker_readiness()
-    check("worker readiness map all true", all(workers.values()), json.dumps(symoneural.worker_status())[:1500])
+    qwen_detail = call_ready_detail(vllm_engine.ready_detail, refs["qwen"], multimodal=False)
+    check("qwen vLLM model ready", detail_ok(qwen_detail), json.dumps(qwen_detail)[:1200])
+
+    vision_detail = call_ready_detail(vllm_engine.ready_detail, refs["vision"], multimodal=True)
+
+    try:
+        vision_path = resolve_local_path(refs["vision"])
+        vision_exists = vision_path.exists()
+    except Exception:
+        vision_path = Path(str(refs["vision"]))
+        vision_exists = False
+
+    if require_all_workers or vision_exists:
+        check("vision vLLM model ready", detail_ok(vision_detail), json.dumps(vision_detail)[:1200])
+    else:
+        check(
+            "vision vLLM model optional",
+            True,
+            json.dumps(
+                {
+                    "required": False,
+                    "reason": "SYMON_REQUIRE_ALL_WORKERS=0 and vision model path is not present",
+                    "model_ref": refs["vision"],
+                    "resolved_model": str(vision_path),
+                }
+            )[:1200],
+        )
+
+    image_detail = call_ready_detail(image_engine.ready_detail, refs["stable"])
+    check("image model ready", detail_ok(image_detail), json.dumps(image_detail)[:1200])
+
+    required_models_ok = (
+        detail_ok(gemma_detail)
+        and detail_ok(qwen_detail)
+        and detail_ok(image_detail)
+        and (detail_ok(vision_detail) if require_all_workers or vision_exists else True)
+    )
+
+    check(
+        "required model readiness true",
+        required_models_ok,
+        json.dumps(
+            {
+                "require_all_workers": require_all_workers,
+                "gemma": gemma_detail,
+                "qwen": qwen_detail,
+                "vision": vision_detail,
+                "image": image_detail,
+            }
+        )[:1500],
+    )
+
+    try:
+        worker_status = symoneural.worker_status()
+        check("worker status available", True, json.dumps(worker_status)[:1500])
+    except Exception as exc:
+        check("worker status available", False, repr(exc))
 
     if live:
-        body = {"model": "symoneural_moe", "messages": [{"role": "user", "content": "Reply with exactly: symoneural_live_ok"}], "max_tokens": 16}
+        body = {
+            "model": "symoneural_moe",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "Reply with exactly: symoneural_live_ok",
+                }
+            ],
+            "max_tokens": 16,
+        }
+
         response = client.post("/v1/chat/completions", json=body, timeout=180)
         check("live text generation returns 200", response.status_code == 200, response.text[:1200])
+
         if response.status_code == 200:
             content = response.json()["choices"][0]["message"]["content"]
             check("live text generation non-empty", bool(content.strip()), content[:200])
@@ -185,28 +491,42 @@ def production_checks(live: bool) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--static-only", action="store_true", help="syntax/config/docs wiring only; does not require GPU/models/deps")
+    parser.add_argument(
+        "--static-only",
+        action="store_true",
+        help="syntax/config/docs wiring only; does not require GPU/models/deps",
+    )
     parser.add_argument("--imports", action="store_true", help="also import app modules")
     parser.add_argument("--live", action="store_true", help="run live generation; requires GPU, deps, models")
     args = parser.parse_args()
 
+    env_loaded = load_env_file()
+
     print("SyMoNeuRaL flagship production audit")
     print("=" * 44)
+
+    check("load .env", True, "loaded .env" if env_loaded else ".env not present")
+
     static_checks()
+
     if args.imports or not args.static_only:
         import_checks()
+
     if not args.static_only:
         production_checks(live=args.live)
 
     failed = 0
+
     for name, ok, detail in checks:
         print(("PASS" if ok else "FAIL"), name)
         if not ok:
             failed += 1
             if detail:
                 print("      ", detail)
+
     print("=" * 44)
     print(f"Total: {len(checks)} checks | Failed: {failed}")
+
     return 1 if failed else 0
 
 

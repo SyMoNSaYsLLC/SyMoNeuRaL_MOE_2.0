@@ -2,13 +2,15 @@ from __future__ import annotations
 
 import gc
 import inspect
+import os
 import threading
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
-from app.runtime.config import HF_CACHE, SETTINGS, looks_like_hf_repo_id, resolve_local_path
 from app.runtime import kv_cache
+from app.runtime.config import HF_CACHE, SETTINGS, looks_like_hf_repo_id, resolve_local_path
 
 
 @dataclass
@@ -25,64 +27,161 @@ _ACTIVE: LoadedModel | None = None
 
 def dependency_status() -> dict[str, Any]:
     status: dict[str, Any] = {"backend": "vllm"}
+
     try:
         import torch
+
         status["torch"] = getattr(torch, "__version__", "present")
         status["cuda_available"] = bool(torch.cuda.is_available())
         status["cuda_device_count"] = int(torch.cuda.device_count()) if torch.cuda.is_available() else 0
+
         if torch.cuda.is_available():
             status["cuda_device_name"] = torch.cuda.get_device_name(0)
             cap = torch.cuda.get_device_capability(0)
             status["cuda_compute_capability"] = f"{cap[0]}.{cap[1]}"
     except Exception as exc:
         status["torch_error"] = str(exc)
+
     try:
         import vllm
+
         status["vllm"] = getattr(vllm, "__version__", "present")
     except Exception as exc:
         status["vllm_error"] = str(exc)
+
+    try:
+        status["vllm_gguf_plugin"] = metadata.version("vllm-gguf-plugin")
+    except Exception as exc:
+        status["vllm_gguf_plugin_error"] = str(exc)
+
     return status
 
 
 def deps_ready() -> tuple[bool, str]:
     d = dependency_status()
+
     for key in ("torch_error", "vllm_error"):
         if key in d:
             return False, f"{key}:{d[key]}"
+
     if SETTINGS.device == "cuda" and not d.get("cuda_available"):
         return False, "cuda_unavailable"
+
     return True, "ok"
+
+
+def gguf_plugin_ready() -> tuple[bool, str]:
+    try:
+        version = metadata.version("vllm-gguf-plugin")
+        return True, f"vllm-gguf-plugin:{version}"
+    except Exception as exc:
+        return False, f"missing_vllm_gguf_plugin:{exc}"
+
+
+def _is_gguf_path(path: str | Path) -> bool:
+    return Path(str(path)).suffix.lower() == ".gguf"
+
+
+def _read_magic(path: Path, n: int = 4) -> bytes:
+    with path.open("rb") as f:
+        return f.read(n)
 
 
 def model_ref_ready(model_ref: str, *, multimodal: bool = False) -> tuple[bool, str, str]:
     ref = str(model_ref).strip()
+
     if not ref:
         return False, "empty_model_ref", ref
+
     local = resolve_local_path(ref)
+
     if local.exists():
+        if local.is_file():
+            if local.suffix.lower() != ".gguf":
+                return False, f"unsupported_vllm_model_file:{local}", str(local)
+
+            if local.stat().st_size < 1024 * 1024:
+                return False, f"gguf_file_too_small:{local}", str(local)
+
+            magic = _read_magic(local)
+            if magic != b"GGUF":
+                return False, f"invalid_gguf_magic:{magic!r}:{local}", str(local)
+
+            if multimodal:
+                return False, f"gguf_vlm_not_supported_by_this_worker:{local}", str(local)
+
+            return True, "ok_gguf_file", str(local)
+
         if not local.is_dir():
-            return False, f"model_must_be_hf_directory_for_vllm:{local}", str(local)
+            return False, f"model_path_not_file_or_directory:{local}", str(local)
+
         if not (local / "config.json").exists():
             return False, f"missing_config_json:{local}", str(local)
+
         tokenizer_files = ["tokenizer.json", "tokenizer.model", "tokenizer_config.json"]
         if not any((local / item).exists() for item in tokenizer_files):
             return False, f"missing_tokenizer_files:{local}", str(local)
+
         weight_patterns = ["*.safetensors", "*.bin", "*.pt", "*.pth"]
         has_weights = any(any(local.glob(pattern)) for pattern in weight_patterns)
-        has_index = any((local / name).exists() for name in ("model.safetensors.index.json", "pytorch_model.bin.index.json"))
+        has_index = any(
+            (local / name).exists()
+            for name in (
+                "model.safetensors.index.json",
+                "pytorch_model.bin.index.json",
+            )
+        )
+
         if not has_weights and not has_index:
             return False, f"missing_model_weights:{local}", str(local)
-        return True, "ok", str(local)
+
+        return True, "ok_hf_directory", str(local)
+
     if SETTINGS.allow_remote_models and looks_like_hf_repo_id(ref):
         return True, "remote_hf_model_allowed", ref
+
     return False, f"model_path_missing:{local}", str(local)
+
+
+def tokenizer_for(name: str, resolved_model: str) -> str | None:
+    safe_name = name.upper().replace("-", "_")
+
+    env_names = [
+        f"SYMON_{safe_name}_TOKENIZER",
+        "SYMON_VLLM_TOKENIZER",
+    ]
+
+    for env_name in env_names:
+        value = os.environ.get(env_name)
+        if value:
+            return value.strip()
+
+    filename = Path(resolved_model).name.lower()
+
+    if "qwen2.5-coder-1.5b" in filename:
+        return "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+
+    if "qwen2.5-coder" in filename:
+        return "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+
+    return None
 
 
 def ready_detail(model_ref: str, *, multimodal: bool = False) -> dict[str, Any]:
     ref_ok, ref_reason, resolved = model_ref_ready(model_ref, multimodal=multimodal)
     deps_ok, deps_reason = deps_ready()
+
+    is_gguf = _is_gguf_path(resolved)
+    plugin_ok = True
+    plugin_reason = "not_required"
+
+    if is_gguf:
+        plugin_ok, plugin_reason = gguf_plugin_ready()
+
+    tokenizer = tokenizer_for("model", resolved) if is_gguf else None
+
     return {
-        "ok": bool(ref_ok and deps_ok),
+        "ok": bool(ref_ok and deps_ok and plugin_ok),
         "backend": "vllm",
         "model_ref": str(model_ref),
         "resolved_model": resolved,
@@ -94,6 +193,17 @@ def ready_detail(model_ref: str, *, multimodal: bool = False) -> dict[str, Any]:
         "device": SETTINGS.device,
         "allow_remote_models": SETTINGS.allow_remote_models,
         "multimodal": multimodal,
+        "gguf": {
+            "enabled": is_gguf,
+            "plugin_ok": plugin_ok,
+            "plugin_reason": plugin_reason,
+            "tokenizer_hint": tokenizer,
+            "tokenizer_env": [
+                "SYMON_GEMMA_TOKENIZER",
+                "SYMON_QWEN_TOKENIZER",
+                "SYMON_VLLM_TOKENIZER",
+            ],
+        },
         "vllm": {
             "dtype": SETTINGS.vllm_dtype,
             "gpu_memory_utilization": SETTINGS.vllm_gpu_memory_utilization,
@@ -111,8 +221,10 @@ def ready_detail(model_ref: str, *, multimodal: bool = False) -> dict[str, Any]:
 
 def _cleanup_cuda() -> None:
     gc.collect()
+
     try:
         import torch
+
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             torch.cuda.ipc_collect()
@@ -122,19 +234,24 @@ def _cleanup_cuda() -> None:
 
 def unload(name: str | None = None) -> None:
     global _ACTIVE
+
     with _LOCK:
         if _ACTIVE is None:
             _cleanup_cuda()
             return
+
         if name is not None and _ACTIVE.name != name:
             return
+
         try:
             try:
                 from vllm.distributed import destroy_distributed_environment, destroy_model_parallel
+
                 destroy_model_parallel()
                 destroy_distributed_environment()
             except Exception:
                 pass
+
             del _ACTIVE.llm
         finally:
             _ACTIVE = None
@@ -144,14 +261,16 @@ def unload(name: str | None = None) -> None:
 def _filter_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
     try:
         sig = inspect.signature(callable_obj)
+
         if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
             return kwargs
+
         return {k: v for k, v in kwargs.items() if k in sig.parameters}
     except Exception:
         return kwargs
 
 
-def _llm_kwargs(resolved_model: str, *, multimodal: bool) -> dict[str, Any]:
+def _llm_kwargs(name: str, resolved_model: str, *, multimodal: bool) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "model": resolved_model,
         "trust_remote_code": SETTINGS.vllm_trust_remote_code,
@@ -169,38 +288,66 @@ def _llm_kwargs(resolved_model: str, *, multimodal: bool) -> dict[str, Any]:
         "max_num_seqs": SETTINGS.vllm_max_num_seqs,
         "max_num_batched_tokens": SETTINGS.vllm_max_num_batched_tokens,
     }
+
     if SETTINGS.vllm_quantization:
         kwargs["quantization"] = SETTINGS.vllm_quantization
+
+    if _is_gguf_path(resolved_model):
+        tokenizer = tokenizer_for(name, resolved_model)
+        if tokenizer:
+            kwargs["tokenizer"] = tokenizer
+
     if multimodal:
         kwargs["limit_mm_per_prompt"] = {"image": SETTINGS.vllm_limit_mm_images}
+
     return kwargs
 
 
 def load(name: str, model_ref: str, *, multimodal: bool = False) -> LoadedModel:
     global _ACTIVE
+
     detail = ready_detail(model_ref, multimodal=multimodal)
     if not detail["ok"]:
         raise RuntimeError(f"{name}_vllm_not_ready:{detail}")
+
     resolved_model = detail["resolved_model"]
+
     with _LOCK:
-        if _ACTIVE is not None and _ACTIVE.name == name and _ACTIVE.model_ref == resolved_model and _ACTIVE.is_multimodal == multimodal:
+        if (
+            _ACTIVE is not None
+            and _ACTIVE.name == name
+            and _ACTIVE.model_ref == resolved_model
+            and _ACTIVE.is_multimodal == multimodal
+        ):
             return _ACTIVE
+
         if _ACTIVE is not None and SETTINGS.single_active_model:
             unload()
+
         try:
             from app.runtime import image_engine
+
             image_engine.unload()
         except Exception:
             pass
+
         from vllm import LLM
-        kwargs = _filter_kwargs(LLM, _llm_kwargs(resolved_model, multimodal=multimodal))
+
+        kwargs = _filter_kwargs(LLM, _llm_kwargs(name, resolved_model, multimodal=multimodal))
         llm = LLM(**kwargs)
-        _ACTIVE = LoadedModel(name=name, model_ref=resolved_model, llm=llm, is_multimodal=multimodal)
+
+        _ACTIVE = LoadedModel(
+            name=name,
+            model_ref=resolved_model,
+            llm=llm,
+            is_multimodal=multimodal,
+        )
         return _ACTIVE
 
 
 def _sampling(max_new_tokens: int, temperature: float) -> Any:
     from vllm import SamplingParams
+
     return SamplingParams(
         max_tokens=max(1, int(max_new_tokens)),
         temperature=max(0.0, float(temperature)),
@@ -209,37 +356,68 @@ def _sampling(max_new_tokens: int, temperature: float) -> Any:
     )
 
 
-def generate(*, name: str, model_ref: str, system: str, prompt: str, max_new_tokens: int, temperature: float) -> str:
+def generate(
+    *,
+    name: str,
+    model_ref: str,
+    system: str,
+    prompt: str,
+    max_new_tokens: int,
+    temperature: float,
+) -> str:
     with _LOCK:
         kv_cache.observe(prompt, worker=name)
+
         loaded = load(name, model_ref, multimodal=False)
         sampling = _sampling(max_new_tokens, temperature)
-        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt}]
+
+        messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ]
+
         if hasattr(loaded.llm, "chat"):
             outputs = loaded.llm.chat(messages, sampling_params=sampling, use_tqdm=False)
         else:
             joined = f"<|system|>\n{system}\n<|user|>\n{prompt}\n<|assistant|>\n"
             outputs = loaded.llm.generate(joined, sampling_params=sampling, use_tqdm=False)
+
         if not outputs or not getattr(outputs[0], "outputs", None):
             raise RuntimeError(f"{name}_vllm_empty_generation")
+
         return outputs[0].outputs[0].text.strip()
 
 
-def generate_vision(*, name: str, model_ref: str, prompt: str, image_paths: list[str], max_new_tokens: int, temperature: float) -> str:
+def generate_vision(
+    *,
+    name: str,
+    model_ref: str,
+    prompt: str,
+    image_paths: list[str],
+    max_new_tokens: int,
+    temperature: float,
+) -> str:
     with _LOCK:
         loaded = load(name, model_ref, multimodal=True)
+
         from PIL import Image
+
         images = [Image.open(Path(p).expanduser()).convert("RGB") for p in image_paths]
         sampling = _sampling(max_new_tokens, temperature)
-        # vLLM's multimodal offline API accepts a prompt plus multi_modal_data.
-        # For chat-template-heavy VLMs, keep prompt plain and let the model processor handle images.
-        multi_modal_data: dict[str, Any]
+
         if len(images) == 1:
-            multi_modal_data = {"image": images[0]}
+            multi_modal_data: dict[str, Any] = {"image": images[0]}
         else:
             multi_modal_data = {"image": images}
-        inputs = {"prompt": prompt, "multi_modal_data": multi_modal_data}
+
+        inputs = {
+            "prompt": prompt,
+            "multi_modal_data": multi_modal_data,
+        }
+
         outputs = loaded.llm.generate(inputs, sampling_params=sampling, use_tqdm=False)
+
         if not outputs or not getattr(outputs[0], "outputs", None):
             raise RuntimeError(f"{name}_vllm_vlm_empty_generation")
+
         return outputs[0].outputs[0].text.strip()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,48 @@ for path in (RUNTIME, OUTPUT, HF_CACHE):
     path.mkdir(parents=True, exist_ok=True)
 
 
+def _load_env_file(path: Path) -> bool:
+    if not path.is_file():
+        return False
+
+    key_re = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+    for raw in path.read_text(errors="ignore").splitlines():
+        line = raw.strip()
+
+        if not line or line.startswith("#"):
+            continue
+
+        if line.startswith("export "):
+            line = line[len("export ") :].strip()
+
+        if "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip()
+
+        if not key_re.match(key):
+            continue
+
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+
+        os.environ.setdefault(key, value)
+
+    return True
+
+
+_load_env_file(ROOT / ".env")
+_load_env_file(ROOT / "config" / "symoneural.env")
+
+
 def _env_bool(name: str, default: bool) -> bool:
     raw = os.environ.get(name)
     if raw is None or raw.strip() == "":
         return default
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
+    return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -26,6 +64,14 @@ def _env_int(name: str, default: int) -> int:
     if raw is None or raw.strip() == "":
         return default
     return int(raw)
+
+
+def _env_int_first(names: list[str], default: int) -> int:
+    for name in names:
+        raw = os.environ.get(name)
+        if raw is not None and raw.strip() != "":
+            return int(raw)
+    return default
 
 
 def _env_float(name: str, default: float) -> float:
@@ -36,7 +82,10 @@ def _env_float(name: str, default: float) -> float:
 
 
 def _env_str(name: str, default: str) -> str:
-    return os.environ.get(name, default).strip()
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    return raw.strip()
 
 
 def resolve_local_path(model_ref: str) -> Path:
@@ -48,18 +97,55 @@ def resolve_local_path(model_ref: str) -> Path:
 
 def looks_like_hf_repo_id(value: str) -> bool:
     value = value.strip()
+
+    if not value:
+        return False
+
     if value.startswith(("/", "./", "../", "~")):
         return False
-    return "/" in value and not any(ch in value for ch in " \\:")
+
+    if any(ch in value for ch in " \\:"):
+        return False
+
+    local_prefixes = (
+        "models/",
+        "data/",
+        "app/",
+        "config/",
+        "docs/",
+        "scripts/",
+        "tools/",
+    )
+
+    if value.startswith(local_prefixes):
+        return False
+
+    parts = value.split("/")
+    return len(parts) == 2 and all(parts)
 
 
 @dataclass(frozen=True)
 class ModelRefs:
-    gemma: str = _env_str("SYMON_GEMMA_MODEL", "models/llm/gemma")
-    qwen: str = _env_str("SYMON_QWEN_MODEL", "models/llm/qwen")
-    vision: str = _env_str("SYMON_VISION_MODEL", "models/vlm/qwen2_5_vl")
-    stable: str = _env_str("SYMON_STABLE_MODEL", "models/sd/stable-diffusion")
-    vit_encoder: str = _env_str("SYMON_VIT_ENCODER_MODEL", "models/vlm/vit-encoder")
+    gemma: str = _env_str(
+        "SYMON_GEMMA_MODEL",
+        "models/llm/gemma-4-12b-it-Q4_K_M.gguf",
+    )
+    qwen: str = _env_str(
+        "SYMON_QWEN_MODEL",
+        "models/llm/qwen2.5-coder-1.5b-instruct-q8_0.gguf",
+    )
+    vision: str = _env_str(
+        "SYMON_VISION_MODEL",
+        "models/vlm/qwen2_5_vl",
+    )
+    stable: str = _env_str(
+        "SYMON_STABLE_MODEL",
+        "models/sd/v1-5-pruned-emaonly.safetensors",
+    )
+    vit_encoder: str = _env_str(
+        "SYMON_VIT_ENCODER_MODEL",
+        "models/vlm/vit-encoder",
+    )
 
 
 @dataclass(frozen=True)
@@ -67,12 +153,14 @@ class RuntimeSettings:
     service_name: str = _env_str("SYMON_SERVICE_NAME", "symoneural_moe")
     bind_host: str = _env_str("SYMON_BIND_HOST", "0.0.0.0")
     bind_port: int = _env_int("SYMON_BIND_PORT", 8000)
+
     device: str = _env_str("SYMON_DEVICE", "cuda").lower()
     text_backend: str = _env_str("SYMON_TEXT_BACKEND", "vllm").lower()
     vision_backend: str = _env_str("SYMON_VISION_BACKEND", "vllm").lower()
     image_backend: str = _env_str("SYMON_IMAGE_BACKEND", "diffusers").lower()
+
     allow_remote_models: bool = _env_bool("SYMON_ALLOW_REMOTE_MODELS", False)
-    require_all_workers: bool = _env_bool("SYMON_REQUIRE_ALL_WORKERS", True)
+    require_all_workers: bool = _env_bool("SYMON_REQUIRE_ALL_WORKERS", False)
 
     # vLLM CUDA text/VLM runtime.
     vllm_dtype: str = _env_str("SYMON_VLLM_DTYPE", "auto")
@@ -91,7 +179,10 @@ class RuntimeSettings:
     vllm_limit_mm_images: int = _env_int("SYMON_VLLM_LIMIT_MM_IMAGES", 4)
 
     # Sampling defaults.
-    max_new_tokens_default: int = _env_int("SYMON_MAX_NEW_TOKENS", 768)
+    max_new_tokens_default: int = _env_int_first(
+        ["SYMON_MAX_NEW_TOKENS_DEFAULT", "SYMON_MAX_NEW_TOKENS"],
+        768,
+    )
     temperature_chat: float = _env_float("SYMON_TEMPERATURE_CHAT", 0.7)
     temperature_code: float = _env_float("SYMON_TEMPERATURE_CODE", 0.2)
     temperature_vision: float = _env_float("SYMON_TEMPERATURE_VISION", 0.2)
@@ -103,9 +194,12 @@ class RuntimeSettings:
     image_height: int = _env_int("SYMON_IMAGE_HEIGHT", 512)
     image_steps: int = _env_int("SYMON_IMAGE_STEPS", 24)
     image_guidance: float = _env_float("SYMON_IMAGE_GUIDANCE", 7.0)
-    image_negative_prompt: str = _env_str("SYMON_IMAGE_NEGATIVE_PROMPT", "low quality, blurry, distorted, watermark")
+    image_negative_prompt: str = _env_str(
+        "SYMON_IMAGE_NEGATIVE_PROMPT",
+        "low quality, blurry, distorted, watermark",
+    )
 
-    # GPU/VRAM guardrails. Defaults fit one 16 GB class card; increase per docs for datacenter GPUs.
+    # GPU/VRAM guardrails for one 16 GB class NVIDIA card.
     vram_target_gb: float = _env_float("SYMON_VRAM_TARGET_GB", 14.0)
     vram_hard_limit_gb: float = _env_float("SYMON_VRAM_HARD_LIMIT_GB", 15.2)
     unload_text_before_image: bool = _env_bool("SYMON_UNLOAD_TEXT_BEFORE_IMAGE", True)

@@ -6,7 +6,11 @@ from app.runtime.worker_types import RequestContext
 from app.workers import gemma, qwen, safetensor, vision
 
 
-def answer(prompt: str, max_tokens: int = 768, images: list[str] | tuple[str, ...] | None = None) -> tuple[str, str, dict]:
+def answer(
+    prompt: str,
+    max_tokens: int = 768,
+    images: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str, str, dict]:
     image_tuple = tuple(images or ())
     ctx = RequestContext(prompt=prompt, max_tokens=max_tokens, images=image_tuple)
     decision = gemma.decide(ctx.prompt, has_images=bool(ctx.images))
@@ -21,7 +25,13 @@ def answer(prompt: str, max_tokens: int = 768, images: list[str] | tuple[str, ..
         result = gemma.write(decision.task, ctx.max_tokens)
 
     metadata = result.metadata.copy()
-    metadata.update({"decision": decision.__dict__, "ok": result.ok, "error": result.error})
+    metadata.update(
+        {
+            "decision": decision.__dict__,
+            "ok": result.ok,
+            "error": result.error,
+        }
+    )
     return result.worker, result.content, metadata
 
 
@@ -32,9 +42,15 @@ def worker_readiness() -> dict[str, bool]:
         "safetensor": safetensor.ready(),
         "vision": vision.ready(),
     }
+
     if not SETTINGS.require_all_workers:
-        # Text-only deployments can be healthy with Gemma/Qwen while image/VLM models are staged later.
-        return {"gemma": workers["gemma"], "qwen": workers["qwen"], "safetensor": True, "vision": True}
+        return {
+            "gemma": workers["gemma"],
+            "qwen": workers["qwen"],
+            "safetensor": workers["safetensor"],
+            "vision": True,
+        }
+
     return workers
 
 

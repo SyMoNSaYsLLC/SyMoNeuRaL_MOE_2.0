@@ -1,19 +1,76 @@
+# Python virtual environment
 .venv/
+
+# Python cache/build output
 __pycache__/
-*.pyc
-*.pyo
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Native/runtime build output
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# Runtime logs and pid files
 *.log
 *.pid
+
+# Local environment files
 .env
 .env.*
 !.env.example
-data/runtime/*
-data/output/*
-data/uploads/*
-data/hf-cache/*
+
+# SyMoNeuRaL runtime data
+data/runtime/
+data/output/
+data/uploads/
+data/hf-cache/
+
+# Keep model directory structure, ignore model contents.
+models/*
+!models/llm/
+!models/vlm/
+!models/sd/
+!models/hf/
+
 models/llm/*
 models/vlm/*
 models/sd/*
+models/hf/**
+
 !models/llm/.keep
 !models/vlm/.keep
 !models/sd/.keep
+!models/hf/.keep
+
+!models/llm/.gitkeep
+!models/vlm/.gitkeep
+!models/sd/.gitkeep
+!models/hf/.gitkeep
+
+# Model/checkpoint files anywhere in repo
+*.gguf
+*.safetensors
+*.ckpt
+*.pt
+*.pth
+*.onnx
+*.engine
+*.ggml
+*.tflite
+*.mlmodel
+
+# Hugging Face / ML cache folders
+.cache/
+huggingface/
+hf-cache/

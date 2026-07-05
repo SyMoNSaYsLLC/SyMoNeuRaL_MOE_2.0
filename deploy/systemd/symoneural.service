@@ -5,9 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/home/google/SyMoNeuRaL_Flagship_MoE
-EnvironmentFile=-/home/google/SyMoNeuRaL_Flagship_MoE/.env
-ExecStart=/home/google/SyMoNeuRaL_Flagship_MoE/.venv/bin/python -m uvicorn app.main:app --host ${SYMON_BIND_HOST} --port ${SYMON_BIND_PORT}
+User=google
+Group=google
+WorkingDirectory=/home/google/SyMoNeuRaL_MoE
+Environment=SYMON_BIND_HOST=0.0.0.0
+Environment=SYMON_BIND_PORT=8000
+EnvironmentFile=-/home/google/SyMoNeuRaL_MoE/.env
+ExecStart=/home/google/SyMoNeuRaL_MoE/.venv/bin/python -m uvicorn app.main:app --host ${SYMON_BIND_HOST} --port ${SYMON_BIND_PORT}
 Restart=on-failure
 RestartSec=5
 
