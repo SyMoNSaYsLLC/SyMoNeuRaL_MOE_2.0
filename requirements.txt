@@ -3,21 +3,22 @@ uvicorn[standard]>=0.29
 pydantic>=2.7
 python-multipart>=0.0.9
 requests>=2.32
+httpx2
 
 # Flagship NVIDIA CUDA LLM/VLM backend.
 vllm>=0.11
+vllm-gguf-plugin
 
 # GPU/runtime support.
 torch
 torchvision
 torchaudio
-pynvml>=11.5
+nvidia-ml-py>=12.535.77
 safetensors>=0.4.3
 huggingface-hub>=0.24
 sentencepiece>=0.2
 protobuf>=5.27
 numpy>=1.26
-vllm-gguf-plugin
 
 # Image generation backend.
 diffusers>=0.30

@@ -174,7 +174,7 @@ class RuntimeSettings:
     vllm_disable_log_stats: bool = _env_bool("SYMON_VLLM_DISABLE_LOG_STATS", True)
     vllm_seed: int = _env_int("SYMON_VLLM_SEED", 0)
     vllm_enable_prefix_caching: bool = _env_bool("SYMON_VLLM_ENABLE_PREFIX_CACHING", True)
-    vllm_max_num_seqs: int = _env_int("SYMON_VLLM_MAX_NUM_SEQS", 16)
+    vllm_max_num_seqs: int = _env_int("SYMON_VLLM_MAX_NUM_SEQS", 1)
     vllm_max_num_batched_tokens: int = _env_int("SYMON_VLLM_MAX_NUM_BATCHED_TOKENS", 8192)
     vllm_limit_mm_images: int = _env_int("SYMON_VLLM_LIMIT_MM_IMAGES", 4)
 
@@ -200,10 +200,23 @@ class RuntimeSettings:
     )
 
     # GPU/VRAM guardrails for one 16 GB class NVIDIA card.
-    vram_target_gb: float = _env_float("SYMON_VRAM_TARGET_GB", 14.0)
+    vram_target_gb: float = _env_float("SYMON_VRAM_TARGET_GB", 14.5)
     vram_hard_limit_gb: float = _env_float("SYMON_VRAM_HARD_LIMIT_GB", 15.2)
     unload_text_before_image: bool = _env_bool("SYMON_UNLOAD_TEXT_BEFORE_IMAGE", True)
     single_active_model: bool = _env_bool("SYMON_SINGLE_ACTIVE_MODEL", True)
+
+    # SyMoNeuRaL MoE VRAM policy.
+    vram_text_gemma_share: float = _env_float("SYMON_VRAM_TEXT_GEMMA_SHARE", 0.20)
+    vram_text_qwen_share: float = _env_float("SYMON_VRAM_TEXT_QWEN_SHARE", 0.80)
+
+    vram_image_gemma_share: float = _env_float("SYMON_VRAM_IMAGE_GEMMA_SHARE", 0.20)
+    vram_image_runtime_share: float = _env_float("SYMON_VRAM_IMAGE_RUNTIME_SHARE", 0.80)
+
+    vram_param_gemma_share: float = _env_float("SYMON_VRAM_PARAM_GEMMA_SHARE", 0.25)
+    vram_param_qwen_share: float = _env_float("SYMON_VRAM_PARAM_QWEN_SHARE", 0.05)
+    vram_param_runtime_share: float = _env_float("SYMON_VRAM_PARAM_RUNTIME_SHARE", 0.70)
+
+    parameter_governor: str = _env_str("SYMON_PARAMETER_GOVERNOR", "qwen").lower()
 
     # SLO-aware admission and flow control.
     max_queue: int = _env_int("SYMON_MAX_QUEUE", 32)

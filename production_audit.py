@@ -77,6 +77,7 @@ PY_MODULES = [
     "app.workers.qwen",
     "app.workers.safetensor",
     "app.workers.vision",
+    "app.workers.vram_guard",
     "app.comms.gemmacodercomms",
     "app.comms.gemmaimagingcomms",
     "app.comms.gemmavisioncomms",
@@ -230,6 +231,10 @@ def call_ready_detail(fn: Any, *args: Any, **kwargs: Any) -> dict[str, Any]:
         return {"ok": False, "error": repr(exc)}
 
 
+def _contains_all(body: str, tokens: tuple[str, ...]) -> bool:
+    return all(token in body for token in tokens)
+
+
 def static_checks() -> None:
     for rel in REQUIRED:
         check(f"exists {rel}", (ROOT / rel).exists())
@@ -274,6 +279,7 @@ def static_checks() -> None:
     req = text("requirements.txt")
     readme = text("README.md")
     config = text("app/runtime/config.py")
+    vram_guard = text("app/workers/vram_guard.py")
 
     check(
         "main exposes OpenAI chat completions",
@@ -284,8 +290,10 @@ def static_checks() -> None:
         "image_url" in main and "extract_user_payload" in main,
     )
     check(
-        "symoneural routes all four workers",
-        all(x in sym for x in ("gemmacodercomms", "gemmaimagingcomms", "gemmavisioncomms")),
+        "symoneural routes text, code, vision, and image-runtime requests",
+        all(x in sym for x in ("gemmacodercomms", "gemmaimagingcomms", "gemmavisioncomms"))
+        and "vram_profile" in sym
+        and "profile_for_decision" in sym,
     )
     check(
         "vLLM is in-process not HTTP server",
@@ -308,8 +316,39 @@ def static_checks() -> None:
         "prefix_hash" in kv and "preferred_worker" in kv,
     )
     check(
-        "requirements includes vllm/diffusers/pynvml",
-        all(x in req for x in ("vllm", "diffusers", "pynvml")),
+        "requirements includes vllm/diffusers/nvidia-ml-py/httpx2",
+        all(x in req for x in ("vllm", "diffusers", "nvidia-ml-py", "httpx2"))
+        and "pynvml" not in req,
+    )
+    check(
+        "config defines MoE VRAM split policy",
+        _contains_all(
+            config,
+            (
+                "vram_text_gemma_share",
+                "vram_text_qwen_share",
+                "vram_image_gemma_share",
+                "vram_image_runtime_share",
+                "vram_param_gemma_share",
+                "vram_param_qwen_share",
+                "vram_param_runtime_share",
+                "parameter_governor",
+            ),
+        ),
+    )
+    check(
+        "vram guard owns role budget profiles",
+        _contains_all(
+            vram_guard,
+            (
+                "VramProfile",
+                "profile_for_decision",
+                "text_profile",
+                "image_profile",
+                "parameter_profile",
+                "policy_status",
+            ),
+        ),
     )
     check(
         "README documents CUDA backend",
@@ -353,18 +392,27 @@ def import_checks() -> None:
             check(f"import {mod}", False, repr(exc))
 
 
+def _shares_close(values: list[float], expected: list[float], tolerance: float = 0.001) -> bool:
+    if len(values) != len(expected):
+        return False
+
+    return all(abs(a - b) <= tolerance for a, b in zip(values, expected, strict=True))
+
+
 def production_checks(live: bool) -> None:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
 
     try:
-        from fastapi.testclient import TestClient
+        from starlette.testclient import TestClient
+
         from app.main import app
         from app import symoneural
         import app.runtime.config as runtime_config
         from app.runtime.config import MODELS, SETTINGS, resolve_local_path
         from app.runtime.backends import vllm_engine
         from app.runtime import image_engine
+        from app.workers import vram_guard
     except Exception as exc:
         check("load app for production checks", False, repr(exc))
         return
@@ -409,10 +457,10 @@ def production_checks(live: bool) -> None:
         check("CUDA visible to torch", bool(deps.get("cuda_available")), json.dumps(deps))
 
     gemma_detail = call_ready_detail(vllm_engine.ready_detail, refs["gemma"], multimodal=False)
-    check("gemma vLLM model ready", detail_ok(gemma_detail), json.dumps(gemma_detail)[:1200])
+    check("gemma manager model path ready", detail_ok(gemma_detail), json.dumps(gemma_detail)[:1200])
 
     qwen_detail = call_ready_detail(vllm_engine.ready_detail, refs["qwen"], multimodal=False)
-    check("qwen vLLM model ready", detail_ok(qwen_detail), json.dumps(qwen_detail)[:1200])
+    check("qwen specialist model ready", detail_ok(qwen_detail), json.dumps(qwen_detail)[:1200])
 
     vision_detail = call_ready_detail(vllm_engine.ready_detail, refs["vision"], multimodal=True)
 
@@ -424,10 +472,10 @@ def production_checks(live: bool) -> None:
         vision_exists = False
 
     if require_all_workers or vision_exists:
-        check("vision vLLM model ready", detail_ok(vision_detail), json.dumps(vision_detail)[:1200])
+        check("vision runtime model ready", detail_ok(vision_detail), json.dumps(vision_detail)[:1200])
     else:
         check(
-            "vision vLLM model optional",
+            "vision runtime model optional",
             True,
             json.dumps(
                 {
@@ -440,7 +488,7 @@ def production_checks(live: bool) -> None:
         )
 
     image_detail = call_ready_detail(image_engine.ready_detail, refs["stable"])
-    check("image model ready", detail_ok(image_detail), json.dumps(image_detail)[:1200])
+    check("image runtime model ready", detail_ok(image_detail), json.dumps(image_detail)[:1200])
 
     required_models_ok = (
         detail_ok(gemma_detail)
@@ -463,6 +511,52 @@ def production_checks(live: bool) -> None:
         )[:1500],
     )
 
+    policy = vram_guard.policy_status()
+    text_profile = vram_guard.text_profile()
+    image_profile = vram_guard.image_profile()
+    param_profile = vram_guard.parameter_profile()
+
+    check(
+        "VRAM target is 14-15 GB",
+        14.0 <= SETTINGS.vram_target_gb <= 15.0,
+        json.dumps(policy)[:1500],
+    )
+    check(
+        "VRAM hard limit <= 15.2 GB",
+        SETTINGS.vram_hard_limit_gb <= 15.2,
+        json.dumps(policy)[:1500],
+    )
+    check(
+        "text split is 20 Gemma / 80 Qwen",
+        _shares_close([role.share for role in text_profile.roles], [0.20, 0.80]),
+        json.dumps(text_profile.as_dict())[:1500],
+    )
+    check(
+        "image split is 20 Gemma / 80 image runtime",
+        _shares_close([role.share for role in image_profile.roles], [0.20, 0.80]),
+        json.dumps(image_profile.as_dict())[:1500],
+    )
+    check(
+        "parameter split is 25 Gemma / 5 Qwen / 70 runtime",
+        _shares_close([role.share for role in param_profile.roles], [0.25, 0.05, 0.70]),
+        json.dumps(param_profile.as_dict())[:1500],
+    )
+    check(
+        "parameter governor is qwen",
+        vram_guard.parameter_governor() == "qwen",
+        json.dumps(policy)[:1500],
+    )
+
+    for profile_name, profile in (
+        ("manager", vram_guard.manager_profile()),
+        ("text", text_profile),
+        ("image", image_profile),
+        ("vision", vram_guard.vision_profile()),
+        ("parameter", param_profile),
+    ):
+        ok, reason = vram_guard.profile_valid(profile)
+        check(f"VRAM profile valid {profile_name}", ok, reason)
+
     try:
         worker_status = symoneural.worker_status()
         check("worker status available", True, json.dumps(worker_status)[:1500])
@@ -475,18 +569,21 @@ def production_checks(live: bool) -> None:
             "messages": [
                 {
                     "role": "user",
-                    "content": "Reply with exactly: symoneural_live_ok",
+                    "content": (
+                        "Code audit route test. Reply with exactly this Python string literal: "
+                        "symoneural_live_ok"
+                    ),
                 }
             ],
-            "max_tokens": 16,
+            "max_tokens": 32,
         }
 
-        response = client.post("/v1/chat/completions", json=body, timeout=180)
-        check("live text generation returns 200", response.status_code == 200, response.text[:1200])
+        response = client.post("/v1/chat/completions", json=body)
+        check("live specialist text generation returns 200", response.status_code == 200, response.text[:1200])
 
         if response.status_code == 200:
             content = response.json()["choices"][0]["message"]["content"]
-            check("live text generation non-empty", bool(content.strip()), content[:200])
+            check("live specialist text generation non-empty", bool(content.strip()), content[:200])
 
 
 def main() -> int:
