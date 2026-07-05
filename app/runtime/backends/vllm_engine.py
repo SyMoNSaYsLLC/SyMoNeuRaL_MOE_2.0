@@ -87,6 +87,132 @@ def _read_magic(path: Path, n: int = 4) -> bytes:
         return f.read(n)
 
 
+def _normalize_support_ref(value: str) -> str:
+    ref = value.strip()
+    if not ref:
+        return ref
+
+    if looks_like_hf_repo_id(ref):
+        return ref
+
+    path = Path(ref).expanduser()
+    if not path.is_absolute():
+        path = resolve_local_path(ref)
+
+    return str(path)
+
+
+def _env_model_value(name: str, suffix: str) -> str | None:
+    safe_name = name.upper().replace("-", "_")
+
+    candidates = [
+        f"SYMON_{safe_name}_{suffix}",
+        f"SYMON_{safe_name}_{suffix}_PATH",
+        f"SYMON_VLLM_{suffix}",
+        f"SYMON_VLLM_{suffix}_PATH",
+    ]
+
+    if suffix == "HF_CONFIG":
+        candidates.extend(
+            [
+                f"SYMON_{safe_name}_BASE_MODEL",
+                "SYMON_VLLM_BASE_MODEL",
+            ]
+        )
+
+    for env_name in candidates:
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            return _normalize_support_ref(value)
+
+    return None
+
+
+def _hf_token() -> str | None:
+    for env_name in (
+        "HF_TOKEN",
+        "HUGGING_FACE_HUB_TOKEN",
+        "HUGGINGFACE_HUB_TOKEN",
+    ):
+        value = os.environ.get(env_name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _worker_name_for_resolved_model(resolved_model: str) -> str:
+    filename = Path(resolved_model).name.lower()
+
+    if "qwen" in filename:
+        return "qwen"
+
+    if "gemma" in filename:
+        return "gemma"
+
+    return "model"
+
+
+def inferred_base_model(name: str, resolved_model: str) -> str | None:
+    filename = Path(resolved_model).name.lower()
+
+    if "qwen2.5-coder-1.5b" in filename:
+        return "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+
+    if "qwen2.5-coder" in filename:
+        return "Qwen/Qwen2.5-Coder-1.5B-Instruct"
+
+    if "gemma-4-12b" in filename:
+        return "google/gemma-4-12B-it"
+
+    if "gemma-3-12b" in filename:
+        return "google/gemma-3-12b-it"
+
+    if "gemma-2-27b" in filename:
+        return "google/gemma-2-27b-it"
+
+    if "gemma-2-9b" in filename:
+        return "google/gemma-2-9b-it"
+
+    if "gemma" in filename and "12b" in filename:
+        return "google/gemma-3-12b-it"
+
+    if "gemma" in filename:
+        return "google/gemma-2-9b-it"
+
+    return None
+
+
+def tokenizer_for(name: str, resolved_model: str) -> str | None:
+    return _env_model_value(name, "TOKENIZER") or inferred_base_model(name, resolved_model)
+
+
+def hf_config_for(name: str, resolved_model: str) -> str | None:
+    return _env_model_value(name, "HF_CONFIG") or inferred_base_model(name, resolved_model)
+
+
+def _dtype_for_gguf(dtype: str) -> str:
+    normalized = str(dtype).strip().lower()
+
+    if normalized in {"float32", "fp32", "f32", "torch.float32"}:
+        return "float32"
+
+    if normalized in {
+        "",
+        "auto",
+        "bf16",
+        "bfloat16",
+        "torch.bfloat16",
+        "half",
+        "fp16",
+        "f16",
+        "float16",
+        "torch.float16",
+    }:
+        return "float16"
+
+    return dtype
+
+
 def model_ref_ready(model_ref: str, *, multimodal: bool = False) -> tuple[bool, str, str]:
     ref = str(model_ref).strip()
 
@@ -143,30 +269,6 @@ def model_ref_ready(model_ref: str, *, multimodal: bool = False) -> tuple[bool, 
     return False, f"model_path_missing:{local}", str(local)
 
 
-def tokenizer_for(name: str, resolved_model: str) -> str | None:
-    safe_name = name.upper().replace("-", "_")
-
-    env_names = [
-        f"SYMON_{safe_name}_TOKENIZER",
-        "SYMON_VLLM_TOKENIZER",
-    ]
-
-    for env_name in env_names:
-        value = os.environ.get(env_name)
-        if value:
-            return value.strip()
-
-    filename = Path(resolved_model).name.lower()
-
-    if "qwen2.5-coder-1.5b" in filename:
-        return "Qwen/Qwen2.5-Coder-1.5B-Instruct"
-
-    if "qwen2.5-coder" in filename:
-        return "Qwen/Qwen2.5-Coder-1.5B-Instruct"
-
-    return None
-
-
 def ready_detail(model_ref: str, *, multimodal: bool = False) -> dict[str, Any]:
     ref_ok, ref_reason, resolved = model_ref_ready(model_ref, multimodal=multimodal)
     deps_ok, deps_reason = deps_ready()
@@ -174,11 +276,14 @@ def ready_detail(model_ref: str, *, multimodal: bool = False) -> dict[str, Any]:
     is_gguf = _is_gguf_path(resolved)
     plugin_ok = True
     plugin_reason = "not_required"
+    name_hint = _worker_name_for_resolved_model(resolved)
 
     if is_gguf:
         plugin_ok, plugin_reason = gguf_plugin_ready()
 
-    tokenizer = tokenizer_for("model", resolved) if is_gguf else None
+    tokenizer = tokenizer_for(name_hint, resolved) if is_gguf else None
+    hf_config = hf_config_for(name_hint, resolved) if is_gguf else None
+    dtype = _dtype_for_gguf(SETTINGS.vllm_dtype) if is_gguf else SETTINGS.vllm_dtype
 
     return {
         "ok": bool(ref_ok and deps_ok and plugin_ok),
@@ -198,19 +303,29 @@ def ready_detail(model_ref: str, *, multimodal: bool = False) -> dict[str, Any]:
             "plugin_ok": plugin_ok,
             "plugin_reason": plugin_reason,
             "tokenizer_hint": tokenizer,
+            "hf_config_hint": hf_config,
+            "dtype_effective": dtype,
             "tokenizer_env": [
                 "SYMON_GEMMA_TOKENIZER",
                 "SYMON_QWEN_TOKENIZER",
                 "SYMON_VLLM_TOKENIZER",
             ],
+            "hf_config_env": [
+                "SYMON_GEMMA_HF_CONFIG",
+                "SYMON_QWEN_HF_CONFIG",
+                "SYMON_VLLM_HF_CONFIG",
+                "SYMON_GEMMA_BASE_MODEL",
+                "SYMON_QWEN_BASE_MODEL",
+                "SYMON_VLLM_BASE_MODEL",
+            ],
         },
         "vllm": {
-            "dtype": SETTINGS.vllm_dtype,
+            "dtype": dtype,
             "gpu_memory_utilization": SETTINGS.vllm_gpu_memory_utilization,
             "max_model_len": SETTINGS.vllm_max_model_len,
             "cpu_offload_gb": SETTINGS.vllm_cpu_offload_gb,
             "swap_space_gb": SETTINGS.vllm_swap_space_gb,
-            "quantization": SETTINGS.vllm_quantization or None,
+            "quantization": None if is_gguf else (SETTINGS.vllm_quantization or None),
             "enforce_eager": SETTINGS.vllm_enforce_eager,
             "enable_prefix_caching": SETTINGS.vllm_enable_prefix_caching,
             "max_num_seqs": SETTINGS.vllm_max_num_seqs,
@@ -293,9 +408,24 @@ def _llm_kwargs(name: str, resolved_model: str, *, multimodal: bool) -> dict[str
         kwargs["quantization"] = SETTINGS.vllm_quantization
 
     if _is_gguf_path(resolved_model):
+        kwargs["load_format"] = "gguf"
+        kwargs["dtype"] = _dtype_for_gguf(str(kwargs.get("dtype", "")))
+
+        # GGUF load_format is the quantized loader. Do not also pass a
+        # separate vLLM quantization method.
+        kwargs.pop("quantization", None)
+
         tokenizer = tokenizer_for(name, resolved_model)
         if tokenizer:
             kwargs["tokenizer"] = tokenizer
+
+        hf_config = hf_config_for(name, resolved_model)
+        if hf_config:
+            kwargs["hf_config_path"] = hf_config
+
+        hf_token = _hf_token()
+        if hf_token:
+            kwargs["hf_token"] = hf_token
 
     if multimodal:
         kwargs["limit_mm_per_prompt"] = {"image": SETTINGS.vllm_limit_mm_images}
