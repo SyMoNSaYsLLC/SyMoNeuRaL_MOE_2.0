@@ -1,0 +1,28 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+pydantic>=2.7
+python-multipart>=0.0.9
+requests>=2.32
+
+# Flagship NVIDIA CUDA LLM/VLM backend.
+vllm>=0.11
+
+# GPU/runtime support.
+torch
+torchvision
+torchaudio
+pynvml>=11.5
+safetensors>=0.4.3
+huggingface-hub>=0.24
+sentencepiece>=0.2
+protobuf>=5.27
+numpy>=1.26
+
+# Image generation backend.
+diffusers>=0.30
+transformers>=4.44
+accelerate>=0.33
+pillow>=10.3
+
+# Optional quant/fallback utilities.
+bitsandbytes>=0.43.3

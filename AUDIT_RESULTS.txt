@@ -1,0 +1,12 @@
+Static verification performed in ChatGPT sandbox:
+
+python3 production_audit.py --static-only
+Total: 74 checks | Failed: 0
+
+python3 production_audit.py --static-only --imports
+Total: 91 checks | Failed: 0
+
+Full production audit intentionally fails in the sandbox because the sandbox has CPU-only torch, no NVIDIA GPU, no vLLM install, and no local model weights. On the target NVIDIA machine run:
+
+python3 production_audit.py
+python3 production_audit.py --live

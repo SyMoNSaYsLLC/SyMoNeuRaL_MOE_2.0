@@ -1,0 +1,15 @@
+[Unit]
+Description=SyMoNeuRaL Flagship MoE Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/google/SyMoNeuRaL_Flagship_MoE
+EnvironmentFile=-/home/google/SyMoNeuRaL_Flagship_MoE/.env
+ExecStart=/home/google/SyMoNeuRaL_Flagship_MoE/.venv/bin/python -m uvicorn app.main:app --host ${SYMON_BIND_HOST} --port ${SYMON_BIND_PORT}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
