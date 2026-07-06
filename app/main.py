@@ -8,6 +8,16 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+# --- INSERT PYTORCH CUDA OPTIMIZATION LAYER HERE ---
+import torch
+
+if torch.cuda.is_available():
+    # Optimizes memory allocation fragmentation
+    torch.cuda.set_per_process_memory_fraction(0.95, device=0)
+    # Forces CUDA to prioritize pinned RAM transfers
+    torch.backends.cuda.matmul.allow_tf32 = True
+# --------------------------------------------------
+
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, PlainTextResponse
@@ -74,27 +84,19 @@ async def require_api_key(request: Request, call_next):
 
 
 @app.on_event("startup")
-async def _warm_up_qwen() -> None:
-    # Load Qwen in the background the moment the server boots, instead of
-    # waiting for the first real visitor's message to trigger the cold load.
-    # Runs as a background task so it doesn't delay "Uvicorn running on...".
-    #
-    # Deliberately calls text_engine.generate() directly instead of going
-    # through qwen.chat() -- chat() acquires flow_control's admission slot
-    # (SYMON_MAX_CONCURRENT_TEXT, default 1), and holding that slot for the
-    # full ~20-30s cold load would flatly REJECT any real request that
-    # arrives during warm-up with a 503, which is worse than the old
-    # behavior (a real early request just took a while and then succeeded).
-    # Bypassing it here means: if a real request races in during warm-up, it
-    # correctly *waits* on vllm_engine's own load lock (shared, one-time
-    # cost) instead of being rejected outright.
+async def _warm_up_engines() -> None:
+    # Sequentially warm up Qwen then SDXL at system boot.
+    # Chaining them ensures they don't race for VRAM simultaneously.
     import asyncio
 
     async def _run() -> None:
+        # 1. Qwen Text Engine Warm-up
         try:
             from app.runtime import text_engine
             from app.runtime.config import MODELS, SETTINGS
             from app.workers.qwen import CHAT_SYSTEM
+
+            print("[startup] Initializing Qwen warm-up...")
             await run_in_threadpool(
                 text_engine.generate,
                 name="qwen",
@@ -107,6 +109,30 @@ async def _warm_up_qwen() -> None:
             print("[startup] Qwen warm-up complete.")
         except Exception as exc:
             print(f"[startup] Qwen warm-up failed (non-fatal): {exc!r}")
+
+        # Give the system 2 seconds to completely clear out VRAM swap layers
+        await asyncio.sleep(2.0)
+
+        # 2. SDXL Image Engine Warm-up
+        try:
+            from app.runtime import image_engine
+            from app.runtime.config import MODELS
+
+            print("[startup] Initializing SDXL warm-up...")
+            # Triggers a ultra-lightweight 1-step pass at small resolution
+            # to compile structural model paths into persistent system memory cache
+            await run_in_threadpool(
+                image_engine.generate,
+                name="sdxl",
+                model_ref=MODELS.stable,
+                prompt="warmup",
+                steps=1,
+                width=512,
+                height=512,
+            )
+            print("[startup] SDXL warm-up complete. All systems nominal.")
+        except Exception as exc:
+            print(f"[startup] SDXL warm-up failed (non-fatal): {exc!r}")
 
     asyncio.create_task(_run())
 
