@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -16,6 +17,21 @@ from pydantic import BaseModel, Field
 from app import symoneural
 from app.runtime import flow_control, gpu, kv_cache
 from app.runtime.config import MODELS, OUTPUT, RUNTIME, SETTINGS
+
+# High-frequency polling endpoints (GPU panel, health chip) otherwise flood
+# data/runtime/symon-manager.log within seconds, burying real request errors.
+# Filtering them out of the access log keeps the log usable for debugging;
+# they're still served normally, just not logged on every call.
+_QUIET_PATHS = ("/gpu/stats", "/health")
+
+
+class _QuietPollingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(f'"GET {path} ' in message for path in _QUIET_PATHS)
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietPollingFilter())
 
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = ROOT / "apps" / "web"
@@ -107,6 +123,29 @@ async def root():
     return FileResponse(index)
 
 
+_ICON_FILES = {
+    "/favicon.ico": ("favicon.ico", "image/x-icon"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/favicon-dark.ico": ("favicon-dark.ico", "image/x-icon"),
+    "/favicon-dark.svg": ("favicon-dark.svg", "image/svg+xml"),
+    "/apple-touch-icon.png": ("apple-touch-icon-180x180.png", "image/png"),
+    "/apple-touch-icon-180x180.png": ("apple-touch-icon-180x180.png", "image/png"),
+}
+
+
+def _icon_route(filename: str, media_type: str):
+    async def _serve():
+        path = WEB_ROOT / filename
+        if not path.exists():
+            raise HTTPException(404, f"icon_missing:{filename}")
+        return FileResponse(path, media_type=media_type)
+    return _serve
+
+
+for _route_path, (_filename, _media_type) in _ICON_FILES.items():
+    app.add_api_route(_route_path, _icon_route(_filename, _media_type), methods=["GET"], include_in_schema=False)
+
+
 @app.get("/health")
 async def health():
     workers = symoneural.worker_readiness()
@@ -135,6 +174,11 @@ async def health():
             },
         },
     }
+
+
+@app.get("/gpu/stats")
+async def gpu_stats():
+    return gpu.status()
 
 
 @app.get("/ready")

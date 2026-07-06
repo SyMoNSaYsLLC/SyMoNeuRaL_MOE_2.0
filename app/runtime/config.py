@@ -40,6 +40,14 @@ def _load_env_file(path: Path) -> bool:
         if not key_re.match(key):
             continue
 
+        # Strip inline trailing comments like `SYMON_X=1   # explanation`.
+        # A comment is a `#` preceded by whitespace. Skip this for values
+        # that start with a quote char -- those are handled by the
+        # quote-unwrap step below, and a literal '#' inside quotes should
+        # not be treated as a comment.
+        if not (len(value) >= 1 and value[0] in {"'", '"'}):
+            value = re.split(r"\s+#", value, maxsplit=1)[0].rstrip()
+
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
 
@@ -162,6 +170,11 @@ class RuntimeSettings:
     allow_remote_models: bool = _env_bool("SYMON_ALLOW_REMOTE_MODELS", False)
     require_all_workers: bool = _env_bool("SYMON_REQUIRE_ALL_WORKERS", False)
 
+    # Gemma is kept fully wired (worker code, VRAM profiles, routing hooks)
+    # but disabled by default -- flip this back to true to reactivate it for
+    # this or a future project without touching any code.
+    gemma_enabled: bool = _env_bool("SYMON_GEMMA_ENABLED", False)
+
     # vLLM CUDA text/VLM runtime.
     vllm_dtype: str = _env_str("SYMON_VLLM_DTYPE", "auto")
     vllm_gpu_memory_utilization: float = _env_float("SYMON_VLLM_GPU_MEMORY_UTILIZATION", 0.82)
@@ -189,6 +202,15 @@ class RuntimeSettings:
     top_p: float = _env_float("SYMON_TOP_P", 0.95)
     top_k: int = _env_int("SYMON_TOP_K", 64)
     repetition_penalty: float = _env_float("SYMON_REPETITION_PENALTY", 1.05)
+    # min_p: alternative to top_p, filters tokens below a probability floor
+    # relative to the most likely token. 0 = disabled (vLLM's own default).
+    min_p: float = _env_float("SYMON_MIN_P", 0.0)
+    # presence_penalty/frequency_penalty: real vLLM SamplingParams fields.
+    # presence_penalty flatly discourages any token already used at all;
+    # frequency_penalty scales with how many times it's been used. Both
+    # 0 = disabled (vLLM's own default).
+    presence_penalty: float = _env_float("SYMON_PRESENCE_PENALTY", 0.0)
+    frequency_penalty: float = _env_float("SYMON_FREQUENCY_PENALTY", 0.0)
 
     # KV cache dtype / attention backend (llama.cpp equivalents: --cache-type-k/v, -fa).
     # "auto" lets vLLM pick; "fp8"/"fp8_e5m2" quantizes the KV cache similar in spirit
@@ -198,11 +220,18 @@ class RuntimeSettings:
     # when available -- this is the vLLM equivalent of llama.cpp's `-fa on`).
     vllm_attention_backend: str = _env_str("SYMON_VLLM_ATTENTION_BACKEND", "")
 
-    # Diffusers image runtime.
-    image_width: int = _env_int("SYMON_IMAGE_WIDTH", 512)
-    image_height: int = _env_int("SYMON_IMAGE_HEIGHT", 512)
-    image_steps: int = _env_int("SYMON_IMAGE_STEPS", 24)
+    # Diffusers image runtime. Defaults sized for SDXL's native 1024x1024;
+    # lower these back to 512 in .env if using an SD1.x-family checkpoint.
+    image_width: int = _env_int("SYMON_IMAGE_WIDTH", 1024)
+    image_height: int = _env_int("SYMON_IMAGE_HEIGHT", 1024)
+    image_steps: int = _env_int("SYMON_IMAGE_STEPS", 30)
     image_guidance: float = _env_float("SYMON_IMAGE_GUIDANCE", 7.0)
+    # -1 = random seed every generation (default). Set a fixed non-negative
+    # integer to make output reproducible across runs with the same prompt.
+    image_seed: int = _env_int("SYMON_IMAGE_SEED", -1)
+    # "default" leaves the checkpoint's own configured scheduler in place.
+    # Recognized names: euler_a, euler, dpm++_2m, dpm++_2m_karras, ddim, unipc.
+    image_scheduler: str = _env_str("SYMON_IMAGE_SCHEDULER", "default")
     image_negative_prompt: str = _env_str(
         "SYMON_IMAGE_NEGATIVE_PROMPT",
         "low quality, blurry, distorted, watermark",

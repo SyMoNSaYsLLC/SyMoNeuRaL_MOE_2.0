@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SyMoNeuRaL MoE</title>
+  <link rel="stylesheet" href="/static/css/style.css?v=symoneural2">
+</head>
+<body>
+<header>
+  <div class="title">SyMoNeuRaL MoE</div>
+  <div id="health" class="chip">checking...</div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div id="messages"></div>
+  </div>
+</main>
+
+<aside id="gpu-panel" class="gpu-panel" aria-label="GPU status">
+  <div class="gpu-head">
+    <span id="gpu-dot" class="gpu-dot"></span>
+    <span id="gpu-name" class="gpu-name">GPU</span>
+  </div>
+  <div class="gpu-row">
+    <span class="gpu-label">VRAM</span>
+    <span id="gpu-mem-text" class="gpu-value">–</span>
+  </div>
+  <div class="gpu-bar-track">
+    <div id="gpu-bar-fill" class="gpu-bar-fill"></div>
+  </div>
+  <div class="gpu-row">
+    <span class="gpu-label">Util</span>
+    <span id="gpu-util" class="gpu-value">–</span>
+  </div>
+  <div class="gpu-row">
+    <span class="gpu-label">Temp</span>
+    <span id="gpu-temp" class="gpu-value">–</span>
+  </div>
+  <div class="gpu-row">
+    <span class="gpu-label">Power</span>
+    <span id="gpu-power" class="gpu-value">–</span>
+  </div>
+</aside>
+
+<div class="composer">
+  <textarea id="prompt" placeholder="Message SyMoNeuRaL..."></textarea>
+  <div class="bar">
+    <span id="busy" class="status"></span>
+    <button id="clear-btn" class="ghost" onclick="clearMessages()">Clear</button>
+    <button id="send" onclick="sendPrompt()" aria-label="Send">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 13V3M8 3L3.5 7.5M8 3L12.5 7.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script src="/static/js/app.js?v=symoneural2"></script>
+</body>
+</html>

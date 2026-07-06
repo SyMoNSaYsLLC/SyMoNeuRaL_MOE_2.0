@@ -13,6 +13,8 @@ SYSTEM = (
 
 
 def ready_detail() -> dict:
+    if not SETTINGS.gemma_enabled:
+        return {"ok": True, "reason": "disabled_by_config", "enabled": False}
     return text_engine.ready_detail(MODELS.gemma)
 
 
@@ -28,6 +30,8 @@ def decide(prompt: str, has_images: bool = False) -> WorkerDecision:
         return WorkerDecision(worker="safetensor", task=prompt, kind="image", reason="image_generation_request")
     if any(x in p for x in ("code", "script", "python", "bash", "rust", "cpp", "c++", "debug", "repo", "bitbake", ".bb", "kernel", "cuda")):
         return WorkerDecision(worker="qwen", task=prompt, kind="code", reason="code_or_build_request")
+    if not SETTINGS.gemma_enabled:
+        return WorkerDecision(worker="qwen", task=prompt, kind="chat", reason="general_chat_gemma_disabled")
     return WorkerDecision(worker="gemma", task=prompt, kind="chat", reason="general_chat")
 
 

@@ -21,7 +21,6 @@ def image(prompt: str) -> WorkerResult:
     if SETTINGS.unload_text_before_image:
         text_engine.unload()
     with flow_control.controller.job("image"):
-        path = image_engine.generate_image(model_path=MODELS.stable, prompt=prompt)
-    rel = path.relative_to(image_engine.OUTPUT.parent) if hasattr(image_engine, "OUTPUT") else path.name
-    content = f"Generated image.\n\n![generated](/outputs/{path.name})\n\nFile: `{path}`"
-    return WorkerResult(worker=NAME, content=content, metadata={"path": str(path), "url": f"/outputs/{path.name}"})
+        path, seed = image_engine.generate_image(model_path=MODELS.stable, prompt=prompt)
+    content = f"Generated image.\n\n![generated](/outputs/{path.name})\n\nSeed: `{seed}`\nFile: `{path}`"
+    return WorkerResult(worker=NAME, content=content, metadata={"path": str(path), "url": f"/outputs/{path.name}", "seed": seed})

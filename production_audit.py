@@ -316,8 +316,8 @@ def static_checks() -> None:
         "prefix_hash" in kv and "preferred_worker" in kv,
     )
     check(
-        "requirements includes vllm/diffusers/nvidia-ml-py/httpx2",
-        all(x in req for x in ("vllm", "diffusers", "nvidia-ml-py", "httpx2"))
+        "requirements includes vllm/diffusers/nvidia-ml-py/httpx",
+        all(x in req for x in ("vllm", "diffusers", "nvidia-ml-py", "httpx"))
         and "pynvml" not in req,
     )
     check(
@@ -457,7 +457,14 @@ def production_checks(live: bool) -> None:
         check("CUDA visible to torch", bool(deps.get("cuda_available")), json.dumps(deps))
 
     gemma_detail = call_ready_detail(vllm_engine.ready_detail, refs["gemma"], multimodal=False)
-    check("gemma manager model path ready", detail_ok(gemma_detail), json.dumps(gemma_detail)[:1200])
+    if SETTINGS.gemma_enabled:
+        check("gemma manager model path ready", detail_ok(gemma_detail), json.dumps(gemma_detail)[:1200])
+    else:
+        check(
+            "gemma manager model optional (disabled)",
+            True,
+            json.dumps({"required": False, "reason": "SYMON_GEMMA_ENABLED=0", **gemma_detail})[:1200],
+        )
 
     qwen_detail = call_ready_detail(vllm_engine.ready_detail, refs["qwen"], multimodal=False)
     check("qwen specialist model ready", detail_ok(qwen_detail), json.dumps(qwen_detail)[:1200])
@@ -491,7 +498,7 @@ def production_checks(live: bool) -> None:
     check("image runtime model ready", detail_ok(image_detail), json.dumps(image_detail)[:1200])
 
     required_models_ok = (
-        detail_ok(gemma_detail)
+        (detail_ok(gemma_detail) if SETTINGS.gemma_enabled else True)
         and detail_ok(qwen_detail)
         and detail_ok(image_detail)
         and (detail_ok(vision_detail) if require_all_workers or vision_exists else True)
@@ -503,6 +510,7 @@ def production_checks(live: bool) -> None:
         json.dumps(
             {
                 "require_all_workers": require_all_workers,
+                "gemma_enabled": SETTINGS.gemma_enabled,
                 "gemma": gemma_detail,
                 "qwen": qwen_detail,
                 "vision": vision_detail,
@@ -526,19 +534,22 @@ def production_checks(live: bool) -> None:
         SETTINGS.vram_hard_limit_gb <= 15.2,
         json.dumps(policy)[:1500],
     )
+    text_expected = [0.20, 0.80] if SETTINGS.gemma_enabled else [1.0]
     check(
-        "text split is 20 Gemma / 80 Qwen",
-        _shares_close([role.share for role in text_profile.roles], [0.20, 0.80]),
+        f"text split is {'20 Gemma / 80 Qwen' if SETTINGS.gemma_enabled else '100 Qwen (Gemma disabled)'}",
+        _shares_close([role.share for role in text_profile.roles], text_expected),
         json.dumps(text_profile.as_dict())[:1500],
     )
+    image_expected = [0.20, 0.80] if SETTINGS.gemma_enabled else [1.0]
     check(
-        "image split is 20 Gemma / 80 image runtime",
-        _shares_close([role.share for role in image_profile.roles], [0.20, 0.80]),
+        f"image split is {'20 Gemma / 80 image runtime' if SETTINGS.gemma_enabled else '100 image runtime (Gemma disabled)'}",
+        _shares_close([role.share for role in image_profile.roles], image_expected),
         json.dumps(image_profile.as_dict())[:1500],
     )
+    param_expected = [0.25, 0.05, 0.70] if SETTINGS.gemma_enabled else [0.05, 0.95]
     check(
-        "parameter split is 25 Gemma / 5 Qwen / 70 runtime",
-        _shares_close([role.share for role in param_profile.roles], [0.25, 0.05, 0.70]),
+        f"parameter split is {'25 Gemma / 5 Qwen / 70 runtime' if SETTINGS.gemma_enabled else '5 Qwen / 95 runtime (Gemma disabled)'}",
+        _shares_close([role.share for role in param_profile.roles], param_expected),
         json.dumps(param_profile.as_dict())[:1500],
     )
     check(

@@ -19,7 +19,10 @@ def answer(
     vram_guard.assert_profile_safe(profile)
 
     if decision.worker == "qwen":
-        result = gemmacodercomms.run(ctx.prompt, decision.task, ctx.max_tokens)
+        if decision.kind == "code":
+            result = gemmacodercomms.run(ctx.prompt, decision.task, ctx.max_tokens)
+        else:
+            result = qwen.chat(decision.task, ctx.max_tokens)
     elif decision.worker == "safetensor":
         result = gemmaimagingcomms.run(ctx.prompt, decision.task)
     elif decision.worker == "vision":

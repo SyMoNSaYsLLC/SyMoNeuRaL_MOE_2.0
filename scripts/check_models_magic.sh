@@ -4,11 +4,26 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# Load .env the same way scripts/start.sh does, so this check reflects the
+# actual configured model paths instead of only whatever the calling shell
+# happens to have exported.
+if [ -f .env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./.env
+  set +a
+elif [ -f config/symoneural.env ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . ./config/symoneural.env
+  set +a
+fi
+
 echo "===== SyMoNeuRaL model magic check ====="
 echo "Repo: $ROOT"
 
-GEMMA_MODEL="${SYMON_GEMMA_MODEL:-models/llm/gemma-4-12b-it-Q4_K_M.gguf}"
-QWEN_MODEL="${SYMON_QWEN_MODEL:-models/llm/qwen2.5-coder-1.5b-instruct-q8_0.gguf}"
+GEMMA_MODEL="${SYMON_GEMMA_MODEL:-models/llm/gemma-4-12b-it-qat-w4a16-ct}"
+QWEN_MODEL="${SYMON_QWEN_MODEL:-models/llm/qwen2.5-coder-1.5b-instruct}"
 STABLE_MODEL="${SYMON_STABLE_MODEL:-models/sd/v1-5-pruned-emaonly.safetensors}"
 
 python3 - "$GEMMA_MODEL" "$QWEN_MODEL" "$STABLE_MODEL" <<'PY'
@@ -46,8 +61,48 @@ for name, path in checks.items():
         fail(f"{name}: is symlink, expected real file")
         continue
 
+    # HF-format checkpoint directory (e.g. native/compressed-tensors Gemma 4,
+    # as opposed to a single-file GGUF/safetensors checkpoint).
+    if path.is_dir():
+        config_path = path / "config.json"
+        if not config_path.exists():
+            fail(f"{name}: directory missing config.json")
+            continue
+
+        tokenizer_files = ["tokenizer.json", "tokenizer.model", "tokenizer_config.json"]
+        if not any((path / item).exists() for item in tokenizer_files):
+            fail(f"{name}: directory missing tokenizer files")
+            continue
+
+        weight_patterns = ["*.safetensors", "*.bin", "*.pt", "*.pth"]
+        has_weights = any(any(path.glob(pattern)) for pattern in weight_patterns)
+        has_index = any(
+            (path / item).exists()
+            for item in ("model.safetensors.index.json", "pytorch_model.bin.index.json")
+        )
+
+        if not has_weights and not has_index:
+            fail(f"{name}: directory missing model weight files")
+            continue
+
+        try:
+            with config_path.open() as f:
+                config = json.load(f)
+        except Exception as exc:
+            fail(f"{name}: config.json is not valid JSON: {exc!r}")
+            continue
+
+        architectures = config.get("architectures", [])
+        quant_config = config.get("quantization_config", {})
+        print(f"architectures: {architectures}")
+        if quant_config:
+            print(f"quantization: {quant_config.get('quant_method', quant_config)}")
+
+        ok(f"{name}: valid HF checkpoint directory")
+        continue
+
     if not path.is_file():
-        fail(f"{name}: not a regular file")
+        fail(f"{name}: not a regular file or directory")
         continue
 
     size = path.stat().st_size

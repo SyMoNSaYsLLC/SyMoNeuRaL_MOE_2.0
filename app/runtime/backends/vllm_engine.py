@@ -230,19 +230,18 @@ def _dtype_for_gguf(dtype: str) -> str:
     if normalized in {"float32", "fp32", "f32", "torch.float32"}:
         return "float32"
 
-    if normalized in {
-        "",
-        "auto",
-        "bf16",
-        "bfloat16",
-        "torch.bfloat16",
-        "half",
-        "fp16",
-        "f16",
-        "float16",
-        "torch.float16",
-    }:
+    if normalized in {"bf16", "bfloat16", "torch.bfloat16"}:
+        return "bfloat16"
+
+    if normalized in {"half", "fp16", "f16", "float16", "torch.float16"}:
         return "float16"
+
+    # "auto" (or unset) -- let vLLM pick based on the checkpoint's own dtype and
+    # the GPU's capability, instead of silently forcing float16. This is what
+    # was causing "Casting torch.bfloat16 to torch.float16" on every load for
+    # bf16 GGUF checkpoints (e.g. Gemma) on GPUs that support bf16 natively.
+    if normalized in {"", "auto"}:
+        return "auto"
 
     return dtype
 
@@ -381,6 +380,109 @@ def _cleanup_cuda() -> None:
         pass
 
 
+def _force_kill_stray_engine_processes() -> None:
+    # Last resort when waiting didn't work: del + vLLM's high-level teardown
+    # calls do not reliably terminate the actual EngineCore child OS process
+    # in every vLLM version/configuration. Rather than proceed into a
+    # guaranteed-OOM engine boot, actively find and kill any stray
+    # "VLLM::EngineCore" processes by name (mirrors scripts/stop.sh's sweep,
+    # but self-healing at runtime instead of only at shutdown). Since this
+    # app only ever intends one active model at a time (SETTINGS.
+    # single_active_model), it is safe to clear all of them here -- unload()
+    # is only called when we're intentionally tearing down the old engine
+    # to make room for a new one.
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "VLLM::EngineCore"],
+            capture_output=True, text=True, timeout=5,
+        )
+        pids = [p for p in result.stdout.split() if p.strip()]
+    except Exception as exc:
+        print(f"[vllm_engine] _force_kill_stray_engine_processes: pgrep failed: {exc!r}")
+        return
+
+    if not pids:
+        return
+
+    print(f"[vllm_engine] Found stray EngineCore process(es) still holding GPU memory: {pids}. Killing.")
+    try:
+        subprocess.run(["kill", "-9", *pids], timeout=5)
+    except Exception as exc:
+        print(f"[vllm_engine] _force_kill_stray_engine_processes: kill failed: {exc!r}")
+
+
+def _wait_for_vram_release(timeout_s: float = 30.0, poll_interval_s: float = 0.5) -> None:
+    # vLLM's V1 engine runs the actual model in a separate child OS process
+    # (visible as "EngineCore pid=..." in logs). torch.cuda.empty_cache() in
+    # THIS (parent) process cannot free memory held by a different process's
+    # CUDA context -- that's an OS-level boundary. Deleting our Python
+    # reference to the LLM wrapper doesn't guarantee that child process has
+    # actually exited and released its VRAM yet. Rather than trust vLLM's
+    # internal teardown timing (which varies by version and isn't always
+    # synchronous), poll real GPU state until memory is actually free, or
+    # give up after timeout_s and proceed anyway (logged, not silent).
+    import time
+
+    from app.runtime import gpu as gpu_status_module
+
+    deadline = time.monotonic() + timeout_s
+    last_free_gb = None
+
+    while time.monotonic() < deadline:
+        try:
+            status = gpu_status_module.status()
+            devices = status.get("devices") or []
+            if not devices:
+                return
+            last_free_gb = float(devices[0].get("free_gb", 0.0))
+            # A conservative bar: enough free VRAM for a typical next engine's
+            # gpu_memory_utilization share of total, with some margin. We
+            # don't know the next model's exact requirement here, so just
+            # require most of the card to look free again.
+            total_gb = float(devices[0].get("total_gb", 0.0))
+            if total_gb > 0 and last_free_gb >= total_gb * 0.6:
+                return
+        except Exception:
+            return
+        time.sleep(poll_interval_s)
+
+    print(
+        f"[vllm_engine] _wait_for_vram_release: timed out after {timeout_s}s, "
+        f"last observed free_gb={last_free_gb}. The old engine process likely "
+        f"did not release its memory on its own -- killing it directly."
+    )
+
+    _force_kill_stray_engine_processes()
+
+    # After force-killing, give the OS/driver a brief moment to actually
+    # reclaim the memory, and check once more (short budget this time --
+    # if it's still stuck after a real kill -9, waiting longer won't help).
+    import time as _time
+
+    for _ in range(10):
+        try:
+            status = gpu_status_module.status()
+            devices = status.get("devices") or []
+            if not devices:
+                return
+            free_gb = float(devices[0].get("free_gb", 0.0))
+            total_gb = float(devices[0].get("total_gb", 0.0))
+            if total_gb > 0 and free_gb >= total_gb * 0.5:
+                print(f"[vllm_engine] VRAM recovered after force-kill: free_gb={free_gb}")
+                return
+        except Exception:
+            return
+        _time.sleep(1)
+
+    print(
+        "[vllm_engine] VRAM still not recovered after force-killing stray "
+        "EngineCore process(es). The next engine boot may still fail -- "
+        "this may require a manual check (nvidia-smi --query-compute-apps=...)."
+    )
+
+
 def unload(name: str | None = None) -> None:
     global _ACTIVE
 
@@ -405,6 +507,7 @@ def unload(name: str | None = None) -> None:
         finally:
             _ACTIVE = None
             _cleanup_cuda()
+            _wait_for_vram_release()
 
 
 def _filter_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
@@ -538,18 +641,28 @@ def _sampling(name: str, max_new_tokens: int, temperature: float) -> Any:
     top_p = _env_model_float(name, "TOP_P", SETTINGS.top_p)
     top_k = _env_model_int(name, "TOP_K", SETTINGS.top_k)
     repetition_penalty = _env_model_float(name, "REPETITION_PENALTY", SETTINGS.repetition_penalty)
+    min_p = _env_model_float(name, "MIN_P", SETTINGS.min_p)
+    presence_penalty = _env_model_float(name, "PRESENCE_PENALTY", SETTINGS.presence_penalty)
+    frequency_penalty = _env_model_float(name, "FREQUENCY_PENALTY", SETTINGS.frequency_penalty)
 
     kwargs: dict[str, Any] = {
         "max_tokens": max(1, int(max_new_tokens)),
         "temperature": max(0.0, float(temperature)),
         "top_p": top_p,
         "repetition_penalty": repetition_penalty,
+        "presence_penalty": presence_penalty,
+        "frequency_penalty": frequency_penalty,
     }
 
     # llama.cpp's --top-k 0 means "disabled"; vLLM uses -1 for that. 0 or fewer
     # from the .env is treated as "off" here so both conventions behave the same.
     if top_k and top_k > 0:
         kwargs["top_k"] = top_k
+
+    # min_p 0 (the SamplingParams default) means "disabled" already, so no
+    # special-casing needed the way top_k needs -- just pass it through.
+    if min_p and min_p > 0:
+        kwargs["min_p"] = min_p
 
     return SamplingParams(**kwargs)
 

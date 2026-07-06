@@ -66,59 +66,81 @@ def manager_profile() -> VramProfile:
 
 
 def text_profile() -> VramProfile:
+    if SETTINGS.gemma_enabled:
+        roles = (
+            _budget("gemma_manager_quality", SETTINGS.vram_text_gemma_share),
+            _budget("qwen_text_runtime", SETTINGS.vram_text_qwen_share),
+        )
+    else:
+        roles = (_budget("qwen_text_runtime", 1.0),)
     return VramProfile(
         name="text",
         worker="qwen",
         governor=parameter_governor(),
         target_gb=SETTINGS.vram_target_gb,
         hard_limit_gb=SETTINGS.vram_hard_limit_gb,
-        roles=(
-            _budget("gemma_manager_quality", SETTINGS.vram_text_gemma_share),
-            _budget("qwen_text_runtime", SETTINGS.vram_text_qwen_share),
-        ),
+        roles=roles,
     )
 
 
 def image_profile() -> VramProfile:
+    if SETTINGS.gemma_enabled:
+        roles = (
+            _budget("gemma_manager_quality", SETTINGS.vram_image_gemma_share),
+            _budget("image_runtime", SETTINGS.vram_image_runtime_share),
+        )
+    else:
+        roles = (_budget("image_runtime", 1.0),)
     return VramProfile(
         name="image",
         worker="safetensor",
         governor=parameter_governor(),
         target_gb=SETTINGS.vram_target_gb,
         hard_limit_gb=SETTINGS.vram_hard_limit_gb,
-        roles=(
-            _budget("gemma_manager_quality", SETTINGS.vram_image_gemma_share),
-            _budget("image_runtime", SETTINGS.vram_image_runtime_share),
-        ),
+        roles=roles,
     )
 
 
 def vision_profile() -> VramProfile:
+    if SETTINGS.gemma_enabled:
+        roles = (
+            _budget("gemma_manager_quality", SETTINGS.vram_text_gemma_share),
+            _budget("vision_runtime", SETTINGS.vram_text_qwen_share),
+        )
+    else:
+        roles = (_budget("vision_runtime", 1.0),)
     return VramProfile(
         name="vision",
         worker="vision",
         governor=parameter_governor(),
         target_gb=SETTINGS.vram_target_gb,
         hard_limit_gb=SETTINGS.vram_hard_limit_gb,
-        roles=(
-            _budget("gemma_manager_quality", SETTINGS.vram_text_gemma_share),
-            _budget("vision_runtime", SETTINGS.vram_text_qwen_share),
-        ),
+        roles=roles,
     )
 
 
 def parameter_profile() -> VramProfile:
+    if SETTINGS.gemma_enabled:
+        roles = (
+            _budget("gemma_manager_quality", SETTINGS.vram_param_gemma_share),
+            _budget("qwen_parameter_governor", SETTINGS.vram_param_qwen_share),
+            _budget("active_runtime", SETTINGS.vram_param_runtime_share),
+        )
+    else:
+        # Gemma's share folds into active_runtime rather than vanishing, so
+        # the roles still sum to 1.0 without a phantom disabled-worker entry.
+        folded_runtime_share = round(SETTINGS.vram_param_runtime_share + SETTINGS.vram_param_gemma_share, 6)
+        roles = (
+            _budget("qwen_parameter_governor", SETTINGS.vram_param_qwen_share),
+            _budget("active_runtime", folded_runtime_share),
+        )
     return VramProfile(
         name="parameter_governance",
         worker=parameter_governor(),
         governor=parameter_governor(),
         target_gb=SETTINGS.vram_target_gb,
         hard_limit_gb=SETTINGS.vram_hard_limit_gb,
-        roles=(
-            _budget("gemma_manager_quality", SETTINGS.vram_param_gemma_share),
-            _budget("qwen_parameter_governor", SETTINGS.vram_param_qwen_share),
-            _budget("active_runtime", SETTINGS.vram_param_runtime_share),
-        ),
+        roles=roles,
     )
 
 
