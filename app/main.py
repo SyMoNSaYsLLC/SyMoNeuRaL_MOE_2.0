@@ -46,6 +46,70 @@ if STATIC_ROOT.exists():
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT)), name="outputs")
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS)), name="uploads")
 
+# Paths that stay open even when SYMON_API_KEY is set. Browsers can't attach
+# an Authorization header to plain <img>/<link> requests, so the assets the
+# page itself needs to render (index page, static JS/CSS, generated images,
+# favicons) must stay reachable without a token, or the UI breaks. Everything
+# else -- the actual API surface -- requires the key.
+_AUTH_EXEMPT_PREFIXES = ("/static", "/outputs", "/uploads")
+_AUTH_EXEMPT_EXACT = {"/", "/favicon.ico", "/favicon.svg", "/favicon-dark.ico", "/favicon-dark.svg",
+                      "/apple-touch-icon.png", "/apple-touch-icon-180x180.png"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if not SETTINGS.api_key:
+        return await call_next(request)
+
+    path = request.url.path
+    if path in _AUTH_EXEMPT_EXACT or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    expected = f"Bearer {SETTINGS.api_key}"
+    if header != expected:
+        return PlainTextResponse("unauthorized", status_code=401)
+
+    return await call_next(request)
+
+
+@app.on_event("startup")
+async def _warm_up_qwen() -> None:
+    # Load Qwen in the background the moment the server boots, instead of
+    # waiting for the first real visitor's message to trigger the cold load.
+    # Runs as a background task so it doesn't delay "Uvicorn running on...".
+    #
+    # Deliberately calls text_engine.generate() directly instead of going
+    # through qwen.chat() -- chat() acquires flow_control's admission slot
+    # (SYMON_MAX_CONCURRENT_TEXT, default 1), and holding that slot for the
+    # full ~20-30s cold load would flatly REJECT any real request that
+    # arrives during warm-up with a 503, which is worse than the old
+    # behavior (a real early request just took a while and then succeeded).
+    # Bypassing it here means: if a real request races in during warm-up, it
+    # correctly *waits* on vllm_engine's own load lock (shared, one-time
+    # cost) instead of being rejected outright.
+    import asyncio
+
+    async def _run() -> None:
+        try:
+            from app.runtime import text_engine
+            from app.runtime.config import MODELS, SETTINGS
+            from app.workers.qwen import CHAT_SYSTEM
+            await run_in_threadpool(
+                text_engine.generate,
+                name="qwen",
+                model_ref=MODELS.qwen,
+                system=CHAT_SYSTEM,
+                prompt="Hi",
+                max_new_tokens=4,
+                temperature=SETTINGS.temperature_chat,
+            )
+            print("[startup] Qwen warm-up complete.")
+        except Exception as exc:
+            print(f"[startup] Qwen warm-up failed (non-fatal): {exc!r}")
+
+    asyncio.create_task(_run())
+
 
 class ChatMessage(BaseModel):
     role: str

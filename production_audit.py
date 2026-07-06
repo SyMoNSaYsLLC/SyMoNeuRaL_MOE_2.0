@@ -441,6 +441,8 @@ def production_checks(live: bool) -> None:
     )
 
     client = TestClient(app)
+    if SETTINGS.api_key:
+        client.headers.update({"Authorization": f"Bearer {SETTINGS.api_key}"})
 
     health = client.get("/health")
     check("GET /health returns 200", health.status_code == 200, health.text[:500])

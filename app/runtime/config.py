@@ -161,6 +161,10 @@ class RuntimeSettings:
     service_name: str = _env_str("SYMON_SERVICE_NAME", "symoneural_moe")
     bind_host: str = _env_str("SYMON_BIND_HOST", "0.0.0.0")
     bind_port: int = _env_int("SYMON_BIND_PORT", 8000)
+    # If set, every request must include "Authorization: Bearer <this value>".
+    # Blank (the default) means no auth -- fine for local dev, NOT fine for a
+    # publicly reachable server. Set this before exposing the app to the internet.
+    api_key: str = _env_str("SYMON_API_KEY", "")
 
     device: str = _env_str("SYMON_DEVICE", "cuda").lower()
     text_backend: str = _env_str("SYMON_TEXT_BACKEND", "vllm").lower()
@@ -232,6 +236,22 @@ class RuntimeSettings:
     # "default" leaves the checkpoint's own configured scheduler in place.
     # Recognized names: euler_a, euler, dpm++_2m, dpm++_2m_karras, ddim, unipc.
     image_scheduler: str = _env_str("SYMON_IMAGE_SCHEDULER", "default")
+    # These were previously all force-enabled unconditionally on every image
+    # load, regardless of available VRAM. attention_slicing/vae_tiling are a
+    # modest speed cost for real VRAM savings, kept on by default. cpu_offload
+    # is a SEVERE speed cost (shuttles weights between GPU/CPU every step) --
+    # it's a last-resort trick for when you don't have enough VRAM to keep the
+    # model resident, not something you want on by default with headroom to
+    # spare. Now defaults OFF; flip it on if you ever run this on a much
+    # smaller card.
+    image_attention_slicing: bool = _env_bool("SYMON_IMAGE_ATTENTION_SLICING", True)
+    image_vae_tiling: bool = _env_bool("SYMON_IMAGE_VAE_TILING", True)
+    image_cpu_offload: bool = _env_bool("SYMON_IMAGE_CPU_OFFLOAD", False)
+    # Optional VAE swap -- e.g. "models/sd/sdxl-vae-fp16-fix" (local, pre-
+    # downloaded, matching this project's no-runtime-network convention) or
+    # an HF repo id if you want diffusers to fetch it directly. Blank (the
+    # default) keeps the checkpoint's own bundled VAE.
+    image_vae_override: str = _env_str("SYMON_IMAGE_VAE_OVERRIDE", "")
     image_negative_prompt: str = _env_str(
         "SYMON_IMAGE_NEGATIVE_PROMPT",
         "low quality, blurry, distorted, watermark",

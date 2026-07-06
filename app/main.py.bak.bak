@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import logging
 import time
 import uuid
 from pathlib import Path
@@ -17,6 +18,21 @@ from app import symoneural
 from app.runtime import flow_control, gpu, kv_cache
 from app.runtime.config import MODELS, OUTPUT, RUNTIME, SETTINGS
 
+# High-frequency polling endpoints (GPU panel, health chip) otherwise flood
+# data/runtime/symon-manager.log within seconds, burying real request errors.
+# Filtering them out of the access log keeps the log usable for debugging;
+# they're still served normally, just not logged on every call.
+_QUIET_PATHS = ("/gpu/stats", "/health")
+
+
+class _QuietPollingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        return not any(f'"GET {path} ' in message for path in _QUIET_PATHS)
+
+
+logging.getLogger("uvicorn.access").addFilter(_QuietPollingFilter())
+
 ROOT = Path(__file__).resolve().parents[1]
 WEB_ROOT = ROOT / "apps" / "web"
 STATIC_ROOT = WEB_ROOT / "static"
@@ -29,6 +45,54 @@ if STATIC_ROOT.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_ROOT)), name="static")
 app.mount("/outputs", StaticFiles(directory=str(OUTPUT)), name="outputs")
 app.mount("/uploads", StaticFiles(directory=str(UPLOADS)), name="uploads")
+
+# Paths that stay open even when SYMON_API_KEY is set. Browsers can't attach
+# an Authorization header to plain <img>/<link> requests, so the assets the
+# page itself needs to render (index page, static JS/CSS, generated images,
+# favicons) must stay reachable without a token, or the UI breaks. Everything
+# else -- the actual API surface -- requires the key.
+_AUTH_EXEMPT_PREFIXES = ("/static", "/outputs", "/uploads")
+_AUTH_EXEMPT_EXACT = {"/", "/favicon.ico", "/favicon.svg", "/favicon-dark.ico", "/favicon-dark.svg",
+                      "/apple-touch-icon.png", "/apple-touch-icon-180x180.png"}
+
+
+@app.middleware("http")
+async def require_api_key(request: Request, call_next):
+    if not SETTINGS.api_key:
+        return await call_next(request)
+
+    path = request.url.path
+    if path in _AUTH_EXEMPT_EXACT or any(path.startswith(p) for p in _AUTH_EXEMPT_PREFIXES):
+        return await call_next(request)
+
+    header = request.headers.get("authorization", "")
+    expected = f"Bearer {SETTINGS.api_key}"
+    if header != expected:
+        return PlainTextResponse("unauthorized", status_code=401)
+
+    return await call_next(request)
+
+
+@app.on_event("startup")
+async def _warm_up_qwen() -> None:
+    # Load Qwen in the background the moment the server boots, instead of
+    # waiting for the first real visitor's message to trigger the cold load.
+    # Runs as a background task so it doesn't delay "Uvicorn running on..."
+    # -- and vllm_engine's own lock means if a real request races in before
+    # this finishes, it just waits for the same load rather than duplicating
+    # it. Failures here are non-fatal: worst case, the first real request
+    # just pays the cold-load cost itself, same as before this existed.
+    import asyncio
+
+    async def _run() -> None:
+        try:
+            from app.workers import qwen
+            await run_in_threadpool(qwen.chat, "Hi", 4)
+            print("[startup] Qwen warm-up complete.")
+        except Exception as exc:
+            print(f"[startup] Qwen warm-up failed (non-fatal): {exc!r}")
+
+    asyncio.create_task(_run())
 
 
 class ChatMessage(BaseModel):
@@ -105,6 +169,29 @@ async def root():
     if not index.exists():
         raise HTTPException(500, "web_index_missing")
     return FileResponse(index)
+
+
+_ICON_FILES = {
+    "/favicon.ico": ("favicon.ico", "image/x-icon"),
+    "/favicon.svg": ("favicon.svg", "image/svg+xml"),
+    "/favicon-dark.ico": ("favicon-dark.ico", "image/x-icon"),
+    "/favicon-dark.svg": ("favicon-dark.svg", "image/svg+xml"),
+    "/apple-touch-icon.png": ("apple-touch-icon-180x180.png", "image/png"),
+    "/apple-touch-icon-180x180.png": ("apple-touch-icon-180x180.png", "image/png"),
+}
+
+
+def _icon_route(filename: str, media_type: str):
+    async def _serve():
+        path = WEB_ROOT / filename
+        if not path.exists():
+            raise HTTPException(404, f"icon_missing:{filename}")
+        return FileResponse(path, media_type=media_type)
+    return _serve
+
+
+for _route_path, (_filename, _media_type) in _ICON_FILES.items():
+    app.add_api_route(_route_path, _icon_route(_filename, _media_type), methods=["GET"], include_in_schema=False)
 
 
 @app.get("/health")

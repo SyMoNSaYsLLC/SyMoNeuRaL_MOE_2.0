@@ -22,5 +22,11 @@ def image(prompt: str) -> WorkerResult:
         text_engine.unload()
     with flow_control.controller.job("image"):
         path, seed = image_engine.generate_image(model_path=MODELS.stable, prompt=prompt)
+    if SETTINGS.single_active_model:
+        # Symmetric with vllm_engine.py unloading the image pipeline before a
+        # new text engine loads: without this, SDXL stays fully resident in
+        # VRAM indefinitely after the last image request, until some later
+        # unrelated text request happens to trigger its release.
+        image_engine.unload()
     content = f"Generated image.\n\n![generated](/outputs/{path.name})\n\nSeed: `{seed}`\nFile: `{path}`"
     return WorkerResult(worker=NAME, content=content, metadata={"path": str(path), "url": f"/outputs/{path.name}", "seed": seed})

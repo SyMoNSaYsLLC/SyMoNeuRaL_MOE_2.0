@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from app.runtime.config import OUTPUT, SETTINGS, resolve_local_path
+from app.runtime.config import OUTPUT, SETTINGS, looks_like_hf_repo_id, resolve_local_path
 
 
 @dataclass
@@ -25,6 +25,35 @@ _SCHEDULER_MAP = {
     "ddim": "DDIMScheduler",
     "unipc": "UniPCMultistepScheduler",
 }
+
+
+def _apply_vae_override(pipe: Any, vae_ref: str, dtype: Any) -> None:
+    # madebyollin/sdxl-vae-fp16-fix (or similar) is a drop-in replacement for
+    # SDXL's bundled VAE, specifically built to avoid the fp16 numerical
+    # instability the original has, and generally reported to run with a
+    # smaller memory footprint during decode.
+    try:
+        from diffusers import AutoencoderKL
+
+        if looks_like_hf_repo_id(vae_ref):
+            vae = AutoencoderKL.from_pretrained(vae_ref, torch_dtype=dtype)
+        else:
+            vae_path = resolve_local_path(vae_ref)
+            if not vae_path.exists():
+                print(f"[image_engine] VAE override path does not exist: {vae_path} -- "
+                      f"keeping the checkpoint's own bundled VAE")
+                return
+            vae = AutoencoderKL.from_pretrained(str(vae_path), torch_dtype=dtype, local_files_only=True)
+
+        if SETTINGS.device == "cuda":
+            import torch
+            if torch.cuda.is_available():
+                vae = vae.to("cuda")
+
+        pipe.vae = vae
+        print(f"[image_engine] VAE override applied: {vae_ref}")
+    except Exception as exc:
+        print(f"[image_engine] VAE override FAILED ({exc!r}) -- keeping the checkpoint's own bundled VAE")
 
 
 def _apply_scheduler(pipe: Any, name: str) -> None:
@@ -169,13 +198,29 @@ def load(model_path: Path | str) -> LoadedImageModel:
                         pass
         if SETTINGS.device == "cuda" and torch.cuda.is_available():
             pipe = pipe.to("cuda")
-            for feature in ("enable_attention_slicing", "enable_vae_tiling", "enable_model_cpu_offload"):
+            enabled_features = []
+            if SETTINGS.image_attention_slicing:
+                enabled_features.append("enable_attention_slicing")
+            if SETTINGS.image_vae_tiling:
+                enabled_features.append("enable_vae_tiling")
+            if SETTINGS.image_cpu_offload:
+                # Note: enable_model_cpu_offload() normally manages device
+                # placement itself rather than being layered on top of an
+                # explicit .to("cuda") -- this is an opt-in, off-by-default
+                # last resort for VRAM-starved setups, not the common path.
+                enabled_features.append("enable_model_cpu_offload")
+            for feature in enabled_features:
                 try:
                     getattr(pipe, feature)()
-                except Exception:
-                    pass
+                    print(f"[image_engine] {feature}: enabled")
+                except Exception as exc:
+                    print(f"[image_engine] {feature}: FAILED to enable ({exc!r}) -- "
+                          f"proceeding without it, this pipeline may not support it")
         else:
             pipe = pipe.to("cpu")
+
+        if SETTINGS.image_vae_override:
+            _apply_vae_override(pipe, SETTINGS.image_vae_override, dtype)
 
         _apply_scheduler(pipe, SETTINGS.image_scheduler)
         _CACHE = LoadedImageModel(path=model_path, pipe=pipe)

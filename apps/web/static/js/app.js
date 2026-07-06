@@ -3,6 +3,71 @@ const promptEl = document.getElementById("prompt");
 const busy = document.getElementById("busy");
 const sendBtn = document.getElementById("send");
 
+/* ---------- API key (only matters if the server has SYMON_API_KEY set) ---------- */
+
+const API_KEY_STORAGE = "symon_api_key";
+
+function getStoredApiKey() {
+  try {
+    return localStorage.getItem(API_KEY_STORAGE) || "";
+  } catch (e) {
+    return "";
+  }
+}
+
+function setStoredApiKey(key) {
+  try {
+    localStorage.setItem(API_KEY_STORAGE, key);
+  } catch (e) {
+    // localStorage unavailable -- key just won't persist across reloads.
+  }
+}
+
+function authHeaders() {
+  const key = getStoredApiKey();
+  return key ? { Authorization: "Bearer " + key } : {};
+}
+
+// Shared across concurrent authFetch calls: if checkHealth() and
+// pollGpuStats() both hit a 401 at nearly the same time (which happens on
+// every page load), only the first one opens a prompt -- the rest just wait
+// on this same promise instead of each opening their own.
+let pendingKeyPrompt = null;
+
+async function ensureApiKeyViaPrompt() {
+  if (!pendingKeyPrompt) {
+    pendingKeyPrompt = (async () => {
+      const entered = window.prompt("This server requires an access key. Enter it:");
+      if (entered) {
+        setStoredApiKey(entered.trim());
+      }
+    })().finally(() => {
+      pendingKeyPrompt = null;
+    });
+  }
+  return pendingKeyPrompt;
+}
+
+// Wraps fetch: attaches the stored key if present, and on a 401 waits for
+// (or triggers) a single shared prompt, then retries with whatever key
+// resulted from it.
+async function authFetch(url, options = {}) {
+  const merged = {
+    ...options,
+    headers: { ...(options.headers || {}), ...authHeaders() },
+  };
+  let res = await fetch(url, merged);
+  if (res.status === 401) {
+    await ensureApiKeyViaPrompt();
+    const retryMerged = {
+      ...options,
+      headers: { ...(options.headers || {}), ...authHeaders() },
+    };
+    res = await fetch(url, retryMerged);
+  }
+  return res;
+}
+
 function escapeHtml(s) {
   return String(s)
     .replaceAll("&", "&amp;")
@@ -44,7 +109,7 @@ function clearMessages() {
 async function checkHealth() {
   const h = document.getElementById("health");
   try {
-    const res = await fetch("/health", { cache: "no-store" });
+    const res = await authFetch("/health", { cache: "no-store" });
     const j = await res.json();
     if (j.ok) {
       h.innerHTML = `<span class="ok">online</span>`;
@@ -78,7 +143,7 @@ function setGpuDot(state) {
 
 async function pollGpuStats() {
   try {
-    const res = await fetch("/gpu/stats", { cache: "no-store" });
+    const res = await authFetch("/gpu/stats", { cache: "no-store" });
     const g = await res.json();
     const dev = (g.devices && g.devices[0]) || null;
 
@@ -124,19 +189,53 @@ function normalizePromptForRouter(text) {
   return t;
 }
 
+const QUICK_MESSAGES = [
+  "Thinking...",
+  "Working on it...",
+  "Routing to the right model...",
+];
+const SLOW_MESSAGES = [
+  "Warming up the model (this happens right after a model switch)...",
+  "Spinning up compute...",
+  "A few more seconds...",
+];
+const VERY_SLOW_MESSAGES = [
+  "Loading model weights -- this is the expensive part...",
+  "Still here. Bigger requests take longer...",
+  "Almost there, promise...",
+];
+
+// Rotates busy.textContent through an escalating set of messages the longer
+// a request takes, instead of one static string sitting frozen on screen.
+// Most requests finish inside the "quick" tier and never see the rest.
+function startBusyMessages() {
+  let elapsedMs = 0;
+  const tick = () => {
+    let pool;
+    if (elapsedMs < 4000) pool = QUICK_MESSAGES;
+    else if (elapsedMs < 14000) pool = SLOW_MESSAGES;
+    else pool = VERY_SLOW_MESSAGES;
+    busy.textContent = pool[Math.floor(Math.random() * pool.length)];
+    elapsedMs += 2000;
+  };
+  tick();
+  const interval = setInterval(tick, 2000);
+  return () => clearInterval(interval);
+}
+
 async function sendPrompt() {
   let prompt = normalizePromptForRouter(promptEl.value);
   if (!prompt) return;
 
   addMessage("user", prompt, "you");
   promptEl.value = "";
-  busy.textContent = "SyMoNeuRaL is working...";
+  const stopBusyMessages = startBusyMessages();
   sendBtn.disabled = true;
   isBusy = true;
   setGpuDot("busy");
 
   try {
-    const res = await fetch("/v1/chat/completions", {
+    const res = await authFetch("/v1/chat/completions", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       cache: "no-store",
@@ -165,6 +264,7 @@ async function sendPrompt() {
   } catch (e) {
     addMessage("assistant", e.message || String(e), "error");
   } finally {
+    stopBusyMessages();
     busy.textContent = "";
     sendBtn.disabled = false;
     isBusy = false;

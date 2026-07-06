@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>SyMoNeuRaL MoE</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/favicon-dark.svg" type="image/svg+xml" media="(prefers-color-scheme: dark)">
+  <link rel="icon" href="/favicon.ico" sizes="any" media="(prefers-color-scheme: light)">
+  <link rel="icon" href="/favicon-dark.ico" sizes="any" media="(prefers-color-scheme: dark)">
+  <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png">
+  <link rel="stylesheet" href="/static/css/style.css?v=symoneural3">
+</head>
+<body>
+<header>
+  <div class="title">SyMoNeuRaL MoE</div>
+  <div id="health" class="chip">checking...</div>
+</header>
+
+<main>
+  <div class="wrap">
+    <div id="messages"></div>
+  </div>
+</main>
+
+<aside id="gpu-panel" class="gpu-panel" aria-label="GPU status">
+  <div class="gpu-head">
+    <span id="gpu-dot" class="gpu-dot"></span>
+    <span id="gpu-name" class="gpu-name">GPU</span>
+    <button id="gpu-toggle" class="gpu-toggle" aria-label="Collapse GPU panel" aria-expanded="true">
+      <svg width="12" height="12" viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M3 4.5L6 7.5L9 4.5" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+  <div id="gpu-body" class="gpu-body">
+    <div class="gpu-row">
+      <span class="gpu-label">VRAM</span>
+      <span id="gpu-mem-text" class="gpu-value">–</span>
+    </div>
+    <div class="gpu-bar-track">
+      <div id="gpu-bar-fill" class="gpu-bar-fill"></div>
+    </div>
+    <div class="gpu-row">
+      <span class="gpu-label">Util</span>
+      <span id="gpu-util" class="gpu-value">–</span>
+    </div>
+    <div class="gpu-row">
+      <span class="gpu-label">Temp</span>
+      <span id="gpu-temp" class="gpu-value">–</span>
+    </div>
+    <div class="gpu-row">
+      <span class="gpu-label">Power</span>
+      <span id="gpu-power" class="gpu-value">–</span>
+    </div>
+  </div>
+</aside>
+
+<div class="composer">
+  <textarea id="prompt" placeholder="Message SyMoNeuRaL..."></textarea>
+  <div class="bar">
+    <span id="busy" class="status"></span>
+    <button id="clear-btn" class="ghost" onclick="clearMessages()">Clear</button>
+    <button id="send" onclick="sendPrompt()" aria-label="Send">
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 13V3M8 3L3.5 7.5M8 3L12.5 7.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </button>
+  </div>
+</div>
+
+<script src="/static/js/app.js?v=symoneural3"></script>
+</body>
+</html>
