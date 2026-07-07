@@ -1,0 +1,4 @@
+# Optional vLLM profile layered on top of baseline requirements.
+-r requirements.txt
+
+vllm>=0.10.0
