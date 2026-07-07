@@ -43,7 +43,7 @@ source .venv/bin/activate
 
 echo
 echo "===== upgrade pip/setuptools/wheel ====="
-python -m pip install --upgrade pip setuptools wheel
+python -m pip install --upgrade pip "setuptools<82" wheel
 
 echo
 echo "===== install $REQ_FILE ====="
