@@ -2,3 +2,5 @@
 -r requirements.txt
 
 vllm>=0.10.0
+diffusers>=0.30.0
+nvidia-ml-py>=12.560.30
