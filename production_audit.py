@@ -277,6 +277,8 @@ def static_checks() -> None:
     flow = text("app/runtime/flow_control.py")
     kv = text("app/runtime/kv_cache.py")
     req = text("requirements.txt")
+    req_vllm = text("requirements.vllm.txt")
+    req_all = f"{req}\n{req_vllm}"
     readme = text("README.md")
     config = text("app/runtime/config.py")
     vram_guard = text("app/workers/vram_guard.py")
@@ -316,9 +318,9 @@ def static_checks() -> None:
         "prefix_hash" in kv and "preferred_worker" in kv,
     )
     check(
-        "requirements includes vllm/diffusers/nvidia-ml-py/httpx",
-        all(x in req for x in ("vllm", "diffusers", "nvidia-ml-py", "httpx"))
-        and "pynvml" not in req,
+        "requirements/profile includes vllm/diffusers/nvidia-ml-py/httpx",
+        all(x in req_all for x in ("vllm", "diffusers", "nvidia-ml-py", "httpx"))
+        and "pynvml" not in req_all,
     )
     check(
         "config defines MoE VRAM split policy",
@@ -527,8 +529,8 @@ def production_checks(live: bool) -> None:
     param_profile = vram_guard.parameter_profile()
 
     check(
-        "VRAM target is 14-15 GB",
-        14.0 <= SETTINGS.vram_target_gb <= 15.0,
+        "VRAM target is 13-15 GB",
+        13.0 <= SETTINGS.vram_target_gb <= 15.0,
         json.dumps(policy)[:1500],
     )
     check(

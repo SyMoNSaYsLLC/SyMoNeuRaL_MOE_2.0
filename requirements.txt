@@ -1,38 +1,17 @@
-fastapi>=0.110
-uvicorn[standard]>=0.29
-pydantic>=2.7
+# Minimal baseline runtime for SyMoNeuRaL (no direct vLLM dependency)
+# Install with: python -m pip install -r requirements.txt
+
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.7.0
+httpx>=0.27.0
 python-multipart>=0.0.9
-requests>=2.32
-httpx>=0.27
-anyio>=4.4
+pillow>=10.4.0
 
-# Flagship NVIDIA CUDA LLM/VLM backend.
-# vllm>=0.19 for native (non-GGUF) Gemma 4 (gemma4 architecture) support.
-# vllm-gguf-plugin removed: both Gemma and Qwen now load natively
-# (compressed-tensors / bf16), and the plugin's quantization-method hook
-# was breaking non-GGUF model loads too (see: GGUFConfig.override_
-# quantization_method() unexpected keyword argument 'hf_config').
-vllm>=0.19
+# Optional vLLM profile:
+# python -m pip install -r requirements.vllm.txt
 
-# GPU/runtime support.
-torch
-torchvision
-torchaudio
-nvidia-ml-py>=12.535.77
-safetensors>=0.4.3
-huggingface-hub>=0.24
-sentencepiece>=0.2
-protobuf>=5.27
-numpy>=1.26
-
-# Image generation backend.
-diffusers>=0.30
-# transformers>=5.5.0 required for vLLM to recognize the gemma4 architecture
-# (Gemma 4, announced 2026-04-02). vllm>=0.19 may still pin an older
-# transformers by default -- upgrade this explicitly after installing vllm.
-transformers>=5.5.0
-accelerate>=0.33
-pillow>=10.3
-
-# Optional quant/fallback utilities.
-bitsandbytes>=0.43.3
+# Optional image-generation stack (enable only if you need diffusion workers):
+# diffusers>=0.30.0
+# accelerate>=0.33.0
+# safetensors>=0.4.0

@@ -1,7 +1,7 @@
 <!-- SYMONEURAL_BOOTSTRAP_START -->
 # First-time setup
 
-Run the repo bootstrap first. It creates the Python environment, installs requirements, verifies imports, and runs the first production audit.
+Run the repo bootstrap first. It creates the Python environment, installs canonical baseline requirements, verifies imports, and runs the first production audit when vLLM is present.
 
 From the repo root:
 
@@ -18,16 +18,44 @@ What `scripts/bootstrap_env.sh` does:
 3. creates or reuses .venv
 4. activates .venv
 5. upgrades pip, setuptools, and wheel
-6. installs requirements.txt
-7. runs pip check
-8. verifies FastAPI/SyMoNeuRaL app imports
-9. runs production_audit.py
+6. installs requirements.txt (baseline)
+7. optionally installs requirements.vllm.txt when SYMON_INSTALL_VLLM=1
+8. runs pip check
+9. verifies FastAPI/SyMoNeuRaL app imports
+10. runs production_audit.py only when vLLM is installed
 ```
 
 After bootstrap succeeds, activate the environment:
 
 ```bash
 source .venv/bin/activate
+```
+
+Force a different file if needed:
+
+```bash
+SYMON_REQUIREMENTS_FILE=path/to/requirements-custom.txt scripts/bootstrap_env.sh
+```
+
+Install optional vLLM extras profile:
+
+```bash
+SYMON_INSTALL_VLLM=1 scripts/bootstrap_env.sh
+# or directly
+python -m pip install -r requirements.vllm.txt
+```
+
+Use the Symon CLI wrappers:
+
+```bash
+# Start vLLM OpenAI-compatible server (delegates to `vllm serve`)
+python -m app.symon_cli serve --model Qwen/Qwen2.5-1.5B-Instruct
+
+# Start the SyMoNeuRaL FastAPI app
+python -m app.symon_cli api --host 0.0.0.0 --port 8000
+
+# Run vLLM benchmark commands
+python -m app.symon_cli bench latency --help
 ```
 
 Run the model file check:
